@@ -194,21 +194,41 @@ def webhook():
 
         # Regular messages
         if not text.startswith('/'):
-            amount, description, currency, is_income = parse_financial_text(text)
+    amount, description, currency, is_income = parse_financial_text(text)
+    is_income_detected, confidence = detect_income_vs_expense(text)
+    
+    # Default to expense if confidence is 0
+    if confidence == 0:
+        is_income = False
+    
+    if amount and description:
+        msg_type = "income" if is_income else "expense"
+        store_message(user_id, username, text, msg_type, amount, currency, description, is_income)
+        
+        action = "earned" if is_income else "spent"
+        emoji = "💰" if is_income else "💸"
+        
+        defaulting_msg = ""
+        if confidence == 0:
+            defaulting_msg = "\n(Defaulting to expense)"
+        
+        send_telegram_message(chat_id,
+            f"📝 {emoji} {currency} {amount:.2f} {action} on {description}{defaulting_msg}\n"
+            "🍄 Stored for Tree Till! 🌳"
+        )
+    elif amount and not description:
+        store_message(user_id, username, text, "correction", amount, currency, description, is_income)
+        action = "earned" if is_income else "spent"
+        send_telegram_message(chat_id,
+            f"✏️ Correction noted! {currency} {amount:.2f} {action}\n"
+            "🍄 Stored for Tree Till! 🌳"
+        )
+    else:
+        store_message(user_id, username, text, "unclear")
+        send_telegram_message(chat_id,
+            f"📝 Noted: '{text}' (unclear)"
+        )
 
-            if amount and description:
-                msg_type = "income" if is_income else "expense"
-                store_message(user_id, username, text, msg_type, amount, currency, description, is_income)
-                action = "earned" if is_income else "spent"
-                emoji = "💰" if is_income else "💸"
-                send_telegram_message(chat_id, f"📝 {emoji} {currency} {amount:.2f} {action} on {description}")
-            elif amount and not description:
-                store_message(user_id, username, text, "correction", amount, currency, description, is_income)
-                action = "earned" if is_income else "spent"
-                send_telegram_message(chat_id, f"✏️ Correction noted! {currency} {amount:.2f} {action}")
-            else:
-                store_message(user_id, username, text, "unclear")
-                send_telegram_message(chat_id, f"📝 Noted: '{text}' (unclear)")
 
         return "OK"
 
