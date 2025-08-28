@@ -3,11 +3,8 @@ import re
 import sqlite3
 from datetime import datetime
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask, request, jsonify
-import threading
-import asyncio
+import requests
 
 # Load environment variables
 load_dotenv()
@@ -33,16 +30,9 @@ def get_allowed_users():
 ALLOWED_USERS = get_allowed_users()
 
 # Security check function
-async def security_check(update: Update) -> bool:
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "Unknown"
-    
+def security_check(user_id, username):
     if user_id not in ALLOWED_USERS:
         print(f"🚫 BLOCKED: User {user_id} (@{username}) tried to access bot")
-        await update.message.reply_text(
-            "🍄 Sorry, this mycelium only responds to its gardener! 🌱\n\n"
-            "This is a personal financial bot. Add your user ID to ALLOWED_USER_IDS in .env"
-        )
         return False
     return True
 
@@ -183,6 +173,131 @@ def store_message(user_id, username, raw_message, message_type, amount=None, cur
     conn.close()
     return message_id
 
+def send_telegram_message(chat_id, text):
+    """Send a message via Telegram Bot API"""
+    token = os.getenv('TELEGRAM_BOT_TOKEN')
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    
+    try:
+        response = requests.post(url, json={
+            'chat_id': chat_id,
+            'text': text,
+            'parse_mode': 'Markdown'
+        })
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Error sending Telegram message: {e}")
+        return False
+
+# FLASK ROUTES
+@flask_app.route('/', methods=['GET'])
+def home():
+    """Root endpoint"""
+    return "🍄 Mycelium Till is running! Webhook mode enabled."
+
+@flask_app.route('/webhook', methods=['POST'])
+def webhook():
+    """Handle Telegram webhook updates"""
+    try:
+        update_data = request.get_json()
+        
+        # Extract message info
+        message = update_data.get('message', {})
+        if not message:
+            return "OK"
+        
+        user = message.get('from', {})
+        user_id = user.get('id')
+        username = user.get('username', 'Unknown')
+        chat_id = message.get('chat', {}).get('id')
+        text = message.get('text', '')
+        
+        if not user_id or not text:
+            return "OK"
+        
+        # Security check
+        if not security_check(user_id, username):
+            send_telegram_message(chat_id, 
+                "🍄 Sorry, this mycelium only responds to its gardener! 🌱\n\n"
+                "This is a personal financial bot."
+            )
+            return "OK"
+        
+        # Handle commands
+        if text.startswith('/start'):
+            store_message(user_id, username, text, "command")
+            send_telegram_message(chat_id,
+                "🍄 Mycelium Till here! I'm your always-ready expense tracker 🌱\n\n"
+                "**Just text me expenses:**\n"
+                "• 'Coffee 5 dollars' or '$4.75 coffee'\n"
+                "• 'Earned 500 euros from client work'\n"
+                "• '20 yuan lunch' or 'Spent 15 on groceries'\n\n"
+                "Tree Till will process everything when your laptop syncs! 🌳"
+            )
+            return "OK"
+        
+        elif text.startswith('/undo'):
+            store_message(user_id, username, text, "undo_request")
+            send_telegram_message(chat_id,
+                "📝 Undo noted! Tree Till will remove your last transaction when it syncs 🌳"
+            )
+            return "OK"
+        
+        elif text.startswith('/whoami'):
+            send_telegram_message(chat_id,
+                f"🔍 **Your Info:**\n"
+                f"🆔 User ID: `{user_id}`\n"
+                f"📝 Username: @{username}\n\n"
+                f"💡 Add your User ID to ALLOWED_USER_IDS in .env"
+            )
+            return "OK"
+        
+        # Handle regular messages
+        if not text.startswith('/'):
+            # Check for correction
+            correction_amount, correction_desc, correction_currency, correction_income = detect_correction(text)
+            
+            if correction_amount:
+                store_message(user_id, username, text, "correction", 
+                             correction_amount, correction_currency, correction_desc, correction_income)
+                
+                action = "earned" if correction_income else "spent"
+                send_telegram_message(chat_id,
+                    f"✏️ Correction noted! {correction_currency} {correction_amount:.2f} {action}\n"
+                    f"🌳 Tree Till will fix this when it syncs!"
+                )
+                return "OK"
+            
+            # Try to parse as transaction
+            amount, description, currency, is_income = parse_transaction(text)
+            
+            if amount and description:
+                msg_type = "income" if is_income else "expense"
+                store_message(user_id, username, text, msg_type, 
+                             amount, currency, description, is_income)
+                
+                action = "earned" if is_income else "spent"
+                emoji = "💰" if is_income else "💸"
+                
+                send_telegram_message(chat_id,
+                    f"📝 {emoji} {currency} {amount:.2f} {action} on {description}\n"
+                    f"🍄 Stored for Tree Till! 🌳"
+                )
+            else:
+                # Store as unclear
+                store_message(user_id, username, text, "unclear")
+                send_telegram_message(chat_id,
+                    f"📝 Noted: '{text}'\n"
+                    f"🤔 Not sure if that's a transaction, but Tree Till will figure it out!\n"
+                    f"💡 Try: 'Coffee 5 dollars' or 'Earned 200 from freelance'"
+                )
+        
+        return "OK"
+        
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        return "Error", 500
+
 # API ENDPOINTS FOR TREE TILL
 @flask_app.route('/api/pending-messages', methods=['GET'])
 def get_pending_messages():
@@ -245,257 +360,42 @@ def health_check():
     """Health check endpoint for Railway"""
     return jsonify({'status': 'healthy', 'service': 'mycelium-till'})
 
-# SECURE COMMAND HANDLERS
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await security_check(update):
-        return
-    
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "Unknown"
-    store_message(user_id, username, "/start", "command")
-    
-    await update.message.reply_text(
-        "🍄 Mycelium Till here! I'm your always-ready expense tracker 🌱\n\n"
-        "**Just text me expenses:**\n"
-        "• 'Coffee 5 dollars' or '$4.75 coffee'\n"
-        "• 'Earned 500 euros from client work'\n"
-        "• '20 yuan lunch' or 'Spent 15 on groceries'\n\n"
-        "**Commands:**\n"
-        "• /stats - Session totals\n"
-        "• /status - Pending messages\n"
-        "• /undo - Undo last entry\n\n"
-        "Tree Till will process everything when your laptop syncs! 🌳"
-    )
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await security_check(update):
-        return
-        
-    user_id = update.effective_user.id
-    
-    try:
-        conn = sqlite3.connect('mycelium_messages.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        SELECT currency, is_income, SUM(amount), COUNT(*)
-        FROM pending_messages 
-        WHERE user_id = ? AND processed = FALSE AND amount IS NOT NULL
-        GROUP BY currency, is_income
-        ''', (user_id,))
-        
-        results = cursor.fetchall()
-        conn.close()
-        
-        if not results:
-            await update.message.reply_text("🍄 No transactions this session!")
-            return
-        
-        stats_text = "🍄 **Session Stats:**\n\n"
-        
-        # Group by currency
-        currencies = {}
-        for currency, is_income, total, count in results:
-            if currency not in currencies:
-                currencies[currency] = {'income': 0, 'expenses': 0}
-            if is_income:
-                currencies[currency]['income'] = total
-            else:
-                currencies[currency]['expenses'] = total
-        
-        for currency, data in currencies.items():
-            income = data['income']
-            expenses = data['expenses']
-            net = income - expenses
-            
-            stats_text += f"**{currency}:**\n"
-            if income > 0:
-                stats_text += f"💰 Income: +{income:.2f}\n"
-            if expenses > 0:
-                stats_text += f"💸 Expenses: -{expenses:.2f}\n"
-            stats_text += f"📊 Net: {net:+.2f}\n\n"
-        
-        await update.message.reply_text(stats_text, parse_mode='Markdown')
-        
-    except Exception as e:
-        await update.message.reply_text(f"🍄 Error getting stats: {str(e)}")
-
-async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await security_check(update):
-        return
-        
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "Unknown"
-    store_message(user_id, username, "/undo", "undo_request")
-    
-    await update.message.reply_text(
-        "📝 Undo noted! Tree Till will remove your last transaction when it syncs 🌳"
-    )
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await security_check(update):
-        return
-        
-    message_text = update.message.text
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "Unknown"
-    
-    # Check for correction
-    correction_amount, correction_desc, correction_currency, correction_income = detect_correction(message_text)
-    
-    if correction_amount:
-        store_message(user_id, username, message_text, "correction", 
-                     correction_amount, correction_currency, correction_desc, correction_income)
-        
-        action = "earned" if correction_income else "spent"
-        await update.message.reply_text(
-            f"✏️ Correction noted! {correction_currency} {correction_amount:.2f} {action}\n"
-            f"🌳 Tree Till will fix this when it syncs!"
-        )
-        return
-    
-    # Try to parse as transaction
-    amount, description, currency, is_income = parse_transaction(message_text)
-    
-    if amount and description:
-        msg_type = "income" if is_income else "expense"
-        store_message(user_id, username, message_text, msg_type, 
-                     amount, currency, description, is_income)
-        
-        action = "earned" if is_income else "spent"
-        emoji = "💰" if is_income else "💸"
-        
-        await update.message.reply_text(
-            f"📝 {emoji} {currency} {amount:.2f} {action} on {description}\n"
-            f"🍄 Stored for Tree Till! 🌳"
-        )
-    else:
-        # Store as unclear
-        store_message(user_id, username, message_text, "unclear")
-        await update.message.reply_text(
-            f"📝 Noted: '{message_text}'\n"
-            f"🤔 Not sure if that's a transaction, but Tree Till will figure it out!\n"
-            f"💡 Try: 'Coffee 5 dollars' or 'Earned 200 from freelance'"
-        )
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await security_check(update):
-        return
-        
-    try:
-        conn = sqlite3.connect('mycelium_messages.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT COUNT(*) FROM pending_messages WHERE processed = FALSE')
-        pending_count = cursor.fetchone()[0]
-        
-        cursor.execute('''
-        SELECT message_type, COUNT(*) 
-        FROM pending_messages 
-        WHERE processed = FALSE 
-        GROUP BY message_type
-        ''')
-        
-        breakdown = cursor.fetchall()
-        conn.close()
-        
-        status_text = f"🍄 **{pending_count} messages** waiting for Tree Till\n\n"
-        
-        if breakdown:
-            emojis = {"expense": "💸", "income": "💰", "correction": "✏️", "unclear": "🤔"}
-            for msg_type, count in breakdown:
-                emoji = emojis.get(msg_type, "📄")
-                status_text += f"{emoji} {count} {msg_type}\n"
-        
-        await update.message.reply_text(status_text, parse_mode='Markdown')
-        
-    except Exception e:
-        await update.message.reply_text(f"🍄 Error: {str(e)}")
-
-async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "No username"
-    first_name = update.effective_user.first_name or "Unknown"
-    
-    await update.message.reply_text(
-        f"🔍 **Your Info:**\n"
-        f"👤 {first_name}\n"
-        f"🆔 User ID: `{user_id}`\n"
-        f"📝 Username: @{username}\n\n"
-        f"💡 Add your User ID to ALLOWED_USER_IDS in .env",
-        parse_mode='Markdown'
-    )
-
-def run_flask():
-    """Run Flask app in separate thread"""
-    port = int(os.environ.get('PORT', 8000))
-    flask_app.run(host='0.0.0.0', port=port, debug=False)
-
-async def run_bot():
-    """Run Telegram bot"""
-    token = os.getenv('TELEGRAM_BOT_TOKEN')
-    if not token:
-        print("ERROR: TELEGRAM_BOT_TOKEN not found!")
-        return
-    
-    app = Application.builder().token(token).build()
-    
-    # Add handlers
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("undo", undo_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("whoami", whoami_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    if os.getenv('RAILWAY_ENVIRONMENT_NAME'):
-        # Railway webhook mode
-        webhook_url = f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}/webhook/{token}"
-        await app.bot.set_webhook(webhook_url)
-        print(f"🍄 Mycelium Till webhook set: {webhook_url}")
-        
-        # Keep the bot running
-        await app.start()
-        await app.updater.start_polling()
-        await app.updater.idle()
-    else:
-        # Local polling mode
-        print("🍄 Mycelium Till running in local polling mode")
-        await app.run_polling()
-
 def main():
     print("🍄 Mycelium Till starting up!")
-    
-    if not ALLOWED_USERS:
-        print("🚨 WARNING: No allowed users! Add ALLOWED_USER_IDS to .env")
-    else:
-        print(f"🔐 Authorized for {len(ALLOWED_USERS)} users")
+    print(f"🔧 Environment: {os.getenv('RAILWAY_ENVIRONMENT_NAME', 'local')}")
+    print(f"🔑 Token exists: {bool(os.getenv('TELEGRAM_BOT_TOKEN'))}")
+    print(f"🛡️ Allowed users: {len(ALLOWED_USERS)}")
+    print("📊 Initializing database...")
     
     init_cloud_database()
     
-    try:
-        if os.getenv('RAILWAY_ENVIRONMENT_NAME'):
-            # Railway deployment mode
-            print("🚂 Railway deployment detected")
-            # Run Flask and bot concurrently
-            flask_thread = threading.Thread(target=run_flask)
-            flask_thread.daemon = True
-            flask_thread.start()
+    # Set webhook URL if on Railway
+    if os.getenv('RAILWAY_ENVIRONMENT_NAME'):
+        try:
+            token = os.getenv('TELEGRAM_BOT_TOKEN')
+            webhook_url = f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}/webhook"
             
-            # Run bot in main thread
-            asyncio.run(run_bot())
-        else:
-            # Local development mode
-            print("💻 Local development mode")
-            asyncio.run(run_bot())
+            # Set webhook via Telegram API
+            response = requests.post(
+                f"https://api.telegram.org/bot{token}/setWebhook",
+                json={'url': webhook_url}
+            )
             
-    except Exception as e:
-        print(f"Error: {e}")
+            if response.status_code == 200:
+                print(f"🍄 Webhook set successfully: {webhook_url}")
+            else:
+                print(f"⚠️  Webhook setup failed: {response.status_code}")
+        except Exception as e:
+            print(f"⚠️  Webhook setup error: {e}")
+    
+    print("🍄 Mycelium Till ready!")
 
 if __name__ == "__main__":
     try:
         print("🍄 Mycelium Till starting up!")
         main()
+        port = int(os.environ.get('PORT', 8000))
+        flask_app.run(host='0.0.0.0', port=port, debug=False)
     except Exception as e:
         print(f"❌ Fatal error: {e}")
         import traceback
