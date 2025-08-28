@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional
 
-class TreeTillConversation:
+class DappleTillConversation:
     def __init__(self, model_name="gemma3n:latest", base_url="http://localhost:11434"):
         self.model_name = model_name
         self.base_url = base_url
@@ -76,14 +76,14 @@ class TreeTillConversation:
             return []
     
     def build_context_prompt(self, user_question: str) -> str:
-        """Build the context-rich prompt for Tree Till"""
+        """Build the context-rich prompt for Dapple Till"""
         
         # Get current financial data
         assets = self.get_latest_assets()
         recent_expenses = self.get_recent_expenses(30)
         
         # Build the comprehensive prompt
-        prompt = f"""You are Till, a witty financial garden spirit. 
+        prompt = f"""You are Dapple Till, a witty financial garden spirit. 
 You always respond in a short poetic form — haiku, limerick, or rhyming couplet. 
 Your poems should sound clever, encouraging, and a bit tongue-in-cheek. 
 They must include at least one concrete number or metric from the "Financial Context."
@@ -151,12 +151,12 @@ CONVERSATION GUIDELINES:
 
 USER QUESTION: "{user_question}"
 
-Respond as Tree Till with warmth, wisdom, and specific insights based on their financial data:"""
+Respond as Dapple Till with warmth, wisdom, and specific insights based on their financial data:"""
 
         return prompt
     
     def chat(self, user_question: str) -> str:
-        """Have a conversation with Tree Till"""
+        """Have a conversation with Dapple Till"""
         
         prompt = self.build_context_prompt(user_question)
         
@@ -187,10 +187,10 @@ Respond as Tree Till with warmth, wisdom, and specific insights based on their f
             return f"❌ Something went wrong with my thinking process: {e}"
 
 def main():
-    print("🌳 TREE TILL - YOUR FINANCIAL CONVERSATION PARTNER 🌳")
-    print("=" * 60)
-    print("💫 Hello! I'm Tree Till, your wise financial advisor.")
-    print("🧠 I know your complete financial picture and spending patterns.")
+    print("🌿 DAPPLE TILL 🌿")
+    print("="*60)
+    print("💫 Hello! I'm Dapple Till, your wise financial advisor.")
+    print("📝 I know your complete financial picture and spending patterns.")
     print("🌱 Ask me anything about your finances - spending, saving, planning!")
     print("\n💡 Try things like:")
     print("   • 'I spent $200 on dining this week, is that okay?'")
@@ -200,39 +200,39 @@ def main():
     print("   • 'What's my biggest expense category lately?'")
     print("\n✨ Type 'quit' to exit\n")
     
-    # Initialize Tree Till
-    tree_till = TreeTillConversation()
+    # Initialize Dapple Till
+    dapple_till = DappleTillConversation()
     
     # Check if we have financial data
-    assets = tree_till.get_latest_assets()
-    recent_expenses = tree_till.get_recent_expenses()
+    assets = dapple_till.get_latest_assets()
+    recent_expenses = dapple_till.get_recent_expenses()
     
     if not assets:
         print("🌱 I notice you haven't done an assets check-in yet!")
-        print("💡 Run 'python assets_checkin.py' first so I know your complete financial picture.")
+        print("💡 Run 'python main.py' first so I know your complete financial picture.")
         return
     
     if not recent_expenses:
         print("🍄 I don't see any processed expenses yet!")
-        print("💡 Make sure you've run 'python process_mycelium.py' to process your spending data.")
-        print("🌳 I can still chat about your assets though!\n")
+        print("💡 Make sure you've run 'python main.py' to process your spending data.")
+        print("🌿 I can still chat about your assets though!\n")
     
     # Start conversation loop
     while True:
         user_input = input("You: ").strip()
         
         if user_input.lower() in ['quit', 'exit', 'bye']:
-            print("\n🌳 Thanks for chatting! Keep growing that financial forest! 🌱✨")
+            print("\n🌿 Thanks for chatting! Keep growing that financial forest! 🌱✨")
             break
         
         if not user_input:
             continue
         
-        print("\n🌳 Tree Till is thinking...\n")
+        print("\n🌿 Dapple Till is thinking...\n")
         
-        # Get Tree Till's response
-        response = tree_till.chat(user_input)
-        print(f"🌳 Tree Till: {response}\n")
+        # Get Dapple Till's response
+        response = dapple_till.chat(user_input)
+        print(f"🌿 Dapple Till: {response}\n")
 
 if __name__ == "__main__":
     main()
