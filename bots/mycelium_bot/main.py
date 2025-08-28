@@ -74,6 +74,10 @@ def detect_income_vs_expense(text):
     income_score = sum(1 for word in income_keywords if word in text_lower)
     expense_score = sum(1 for word in expense_keywords if word in text_lower)
     
+    if income_score == 0 and expense_score == 0:
+        # Default to expense if no clear signals
+        return False, 0  
+    
     return income_score > expense_score, max(income_score, expense_score)
 
 def parse_transaction(message_text):
