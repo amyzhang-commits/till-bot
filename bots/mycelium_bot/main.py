@@ -147,6 +147,12 @@ def send_telegram_message(chat_id, text):
         print(f"Error sending Telegram message: {e}")
         return False
 
+# FLASK ROUTES
+@flask_app.route('/', methods=['GET'])
+def home():
+    """Root endpoint"""
+    return "🍄 Mycelium Till is running! Webhook mode enabled."
+
 # Webhook route
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
