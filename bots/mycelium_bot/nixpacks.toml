@@ -1,0 +1,17 @@
+[phases.setup]
+nixPkgs = ['python39', 'sqlite']
+
+[phases.install]
+cmds = ['pip install -r requirements.txt']
+
+[phases.build]
+cmds = [
+  'python -c "import sqlite3; conn = sqlite3.connect(\"mycelium_messages.db\"); conn.execute(\"SELECT 1\"); conn.close(); print(\"Database accessible\")"'
+]
+
+[start]
+cmd = 'python main.py'
+
+[variables]
+PYTHONPATH = '/app'
+DATABASE_URL = 'sqlite:///mycelium_messages.db'

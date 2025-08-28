@@ -1,0 +1,6 @@
+**/.env
+till_expenses.db
+*.db
+__pycache__/
+.venv/
+.DS_Store

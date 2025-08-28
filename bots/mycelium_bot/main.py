@@ -5,9 +5,15 @@ from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from flask import Flask, request, jsonify
+import threading
+import asyncio
 
 # Load environment variables
 load_dotenv()
+
+# Flask app for API endpoints
+flask_app = Flask(__name__)
 
 # Get allowed users from environment
 def get_allowed_users():
@@ -177,6 +183,68 @@ def store_message(user_id, username, raw_message, message_type, amount=None, cur
     conn.close()
     return message_id
 
+# API ENDPOINTS FOR TREE TILL
+@flask_app.route('/api/pending-messages', methods=['GET'])
+def get_pending_messages():
+    """API endpoint for Tree Till to fetch pending messages"""
+    try:
+        conn = sqlite3.connect('mycelium_messages.db')
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT id, user_id, username, raw_message, message_type, 
+               amount, currency, description, is_income, timestamp
+        FROM pending_messages 
+        WHERE processed = FALSE AND amount IS NOT NULL
+        ORDER BY timestamp ASC
+        ''')
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        # Convert to JSON-serializable format
+        messages = []
+        for row in results:
+            messages.append({
+                'id': row[0], 'user_id': row[1], 'username': row[2],
+                'raw_message': row[3], 'message_type': row[4],
+                'amount': row[5], 'currency': row[6], 'description': row[7],
+                'is_income': row[8], 'timestamp': row[9]
+            })
+        
+        return jsonify(messages)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/api/mark-processed', methods=['POST'])
+def mark_processed():
+    """API endpoint for Tree Till to mark messages as processed"""
+    try:
+        message_ids = request.json.get('message_ids', [])
+        
+        if not message_ids:
+            return jsonify({'error': 'No message IDs provided'}), 400
+        
+        conn = sqlite3.connect('mycelium_messages.db')
+        cursor = conn.cursor()
+        
+        # Mark messages as processed
+        placeholders = ','.join(['?' for _ in message_ids])
+        cursor.execute(f'UPDATE pending_messages SET processed = TRUE WHERE id IN ({placeholders})', message_ids)
+        
+        updated_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'success': True, 'updated': updated_count})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for Railway"""
+    return jsonify({'status': 'healthy', 'service': 'mycelium-till'})
+
 # SECURE COMMAND HANDLERS
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await security_check(update):
@@ -341,7 +409,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(status_text, parse_mode='Markdown')
         
-    except Exception as e:
+    except Exception e:
         await update.message.reply_text(f"🍄 Error: {str(e)}")
 
 async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -358,6 +426,43 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+def run_flask():
+    """Run Flask app in separate thread"""
+    port = int(os.environ.get('PORT', 5000))
+    flask_app.run(host='0.0.0.0', port=port, debug=False)
+
+async def run_bot():
+    """Run Telegram bot"""
+    token = os.getenv('TELEGRAM_BOT_TOKEN')
+    if not token:
+        print("ERROR: TELEGRAM_BOT_TOKEN not found!")
+        return
+    
+    app = Application.builder().token(token).build()
+    
+    # Add handlers
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("undo", undo_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("whoami", whoami_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    if os.getenv('RAILWAY_ENVIRONMENT_NAME'):
+        # Railway webhook mode
+        webhook_url = f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}/webhook/{token}"
+        await app.bot.set_webhook(webhook_url)
+        print(f"🍄 Mycelium Till webhook set: {webhook_url}")
+        
+        # Keep the bot running
+        await app.start()
+        await app.updater.start_polling()
+        await app.updater.idle()
+    else:
+        # Local polling mode
+        print("🍄 Mycelium Till running in local polling mode")
+        await app.run_polling()
+
 def main():
     print("🍄 Mycelium Till starting up!")
     
@@ -368,25 +473,22 @@ def main():
     
     init_cloud_database()
     
-    token = os.getenv('TELEGRAM_BOT_TOKEN')
-    if not token:
-        print("ERROR: TELEGRAM_BOT_TOKEN not found!")
-        return
-    
     try:
-        app = Application.builder().token(token).build()
-        
-        # Add handlers
-        app.add_handler(CommandHandler("start", start_command))
-        app.add_handler(CommandHandler("stats", stats_command))
-        app.add_handler(CommandHandler("undo", undo_command))
-        app.add_handler(CommandHandler("status", status_command))
-        app.add_handler(CommandHandler("whoami", whoami_command))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        print("🍄 Mycelium Till is SECURE and ready!")
-        app.run_polling()
-        
+        if os.getenv('RAILWAY_ENVIRONMENT_NAME'):
+            # Railway deployment mode
+            print("🚂 Railway deployment detected")
+            # Run Flask and bot concurrently
+            flask_thread = threading.Thread(target=run_flask)
+            flask_thread.daemon = True
+            flask_thread.start()
+            
+            # Run bot in main thread
+            asyncio.run(run_bot())
+        else:
+            # Local development mode
+            print("💻 Local development mode")
+            asyncio.run(run_bot())
+            
     except Exception as e:
         print(f"Error: {e}")
 
