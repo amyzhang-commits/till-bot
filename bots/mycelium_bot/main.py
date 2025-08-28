@@ -428,7 +428,7 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def run_flask():
     """Run Flask app in separate thread"""
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 8000))
     flask_app.run(host='0.0.0.0', port=port, debug=False)
 
 async def run_bot():
@@ -493,4 +493,11 @@ def main():
         print(f"Error: {e}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        print("🍄 Mycelium Till starting up!")
+        main()
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
