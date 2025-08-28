@@ -54,27 +54,81 @@ def detect_currency(text):
         return 'USD', text.replace('$', '').strip()
     return 'USD', text
 
-# Unified parser for transactions & corrections
+# FIXED: Better income vs expense detection
 def detect_income_vs_expense(text):
     text_lower = text.lower()
-    income_keywords = ['earn', 'earned', 'made', 'income', 'freelance', 'payment', 'received']
-    expense_keywords = ['spent', 'spend', 'bought', 'buy', 'paid', 'cost']
+    
+    # Strong income indicators
+    strong_income_keywords = [
+        'earned', 'made money', 'income', 'freelance payment', 'client paid', 
+        'received payment', 'salary', 'bonus', 'refund', 'cashback', 
+        'sold something', 'gift money'
+    ]
+    
+    # Strong expense indicators  
+    strong_expense_keywords = [
+        'spent', 'bought', 'purchased', 'paid for', 'cost me', 'bill',
+        'subscription', 'fee', 'charge', 'rent', 'food', 'coffee',
+        'book', 'course', 'lesson', 'uber', 'taxi', 'gas', 'groceries'
+    ]
+    
+    # Weaker indicators
+    income_keywords = ['earned', 'made', 'received', 'got paid']
+    expense_keywords = ['paid', 'spend', 'buy', 'cost', 'on ', 'for ']
+    
+    # Check strong indicators first
+    for keyword in strong_income_keywords:
+        if keyword in text_lower:
+            return True, 3  # Strong confidence income
+            
+    for keyword in strong_expense_keywords:
+        if keyword in text_lower:
+            return False, 3  # Strong confidence expense
+    
+    # Check patterns that are clearly expenses
+    expense_patterns = [
+        r'\d+(?:\.\d{2})?\s+(?:on|for)\s+\w+',  # "8.60 on book" or "8.60 for book"
+        r'\w+\s+\d+(?:\.\d{2})?',  # "coffee 5.50"
+        r'spent.*\d+',  # "spent 20"
+        r'bought.*\d+',  # "bought something for 10"
+    ]
+    
+    for pattern in expense_patterns:
+        if re.search(pattern, text_lower):
+            return False, 2  # Medium confidence expense
+    
+    # Fallback to basic keyword counting
     income_score = sum(1 for word in income_keywords if word in text_lower)
     expense_score = sum(1 for word in expense_keywords if word in text_lower)
-    if max(income_score, expense_score) == 0:
-        return False, 0  # default to expense
-    return income_score > expense_score, max(income_score, expense_score)
+    
+    if income_score > expense_score:
+        return True, 1
+    elif expense_score > income_score:
+        return False, 1
+    else:
+        return False, 0  # Default to expense with no confidence
 
 def parse_financial_text(message_text):
     original_text = message_text.strip()
     currency, text_without_currency = detect_currency(original_text)
-    is_income, _ = detect_income_vs_expense(original_text)
+    is_income, confidence = detect_income_vs_expense(original_text)
     text = text_without_currency.lower()
 
     patterns = [
-        (r'(?:earned?|made|received|spent|paid)\s*(\d+(?:\.\d{2})?)\s*(?:from|on|for)?\s*(.*)', 'amount_first'),
-        (r'^(\d+(?:\.\d{2})?)\s+(?:for\s+|dollars?\s+|euros?\s+)?(.*)', 'amount_first'),
+        # Explicit action patterns (highest priority)
+        (r'(?:earned|made|received)\s*(\d+(?:\.\d{2})?)\s*(?:from|for)?\s*(.*)', 'amount_first'),
+        (r'(?:spent|paid|bought)\s*(\d+(?:\.\d{2})?)\s*(?:on|for)\s*(.*)', 'amount_first'),
+        
+        # Amount + preposition patterns  
+        (r'^(\d+(?:\.\d{2})?)\s+(?:for|on)\s+(.*)', 'amount_first'),
+        
+        # Simple amount first patterns
+        (r'^(\d+(?:\.\d{2})?)\s+(?:dollars?|euros?|pounds?|yen|yuan)?\s*(.*)', 'amount_first'),
+        
+        # Description first patterns
         (r'^(.*?)\s+(\d+(?:\.\d{2})?)$', 'desc_first'),
+        
+        # Correction patterns
         (r'(?:actually|wait|i meant|should be|correction|make that|change to|fix that|sorry|oops)[,\s]*(\d+(?:\.\d{2})?)', 'correction')
     ]
 
@@ -84,7 +138,7 @@ def parse_financial_text(message_text):
             try:
                 if order_type == 'amount_first':
                     amount = float(match.group(1))
-                    description = match.group(2).strip()
+                    description = match.group(2).strip() if len(match.groups()) > 1 else None
                 elif order_type == 'desc_first':
                     description = match.group(1).strip()
                     amount = float(match.group(2))
@@ -95,14 +149,18 @@ def parse_financial_text(message_text):
                 else:
                     continue
 
+                # Clean up description
                 if description:
-                    description = re.sub(r'^\b(?:on|for|from)\b\s*', '', description).strip()
+                    description = re.sub(r'^(?:on|for|from)\s*', '', description).strip()
+                    # Don't return empty descriptions
+                    if not description:
+                        description = None
 
-                return amount, description, currency, is_income
+                return amount, description, currency, is_income, confidence
             except (ValueError, IndexError):
                 continue
 
-    return None, None, currency, False  # default to expense
+    return None, None, currency, False, 0
 
 # Database functions
 def init_cloud_database():
@@ -150,10 +208,8 @@ def send_telegram_message(chat_id, text):
 # FLASK ROUTES
 @flask_app.route('/', methods=['GET'])
 def home():
-    """Root endpoint"""
     return "🍄 Mycelium Till is running! Webhook mode enabled."
 
-# Webhook route
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -181,54 +237,56 @@ def webhook():
         if text.startswith('/start'):
             store_message(user_id, username, text, "command")
             send_telegram_message(chat_id,
-                "🍄 Mycelium Till here! Send expenses or income, e.g., 'Coffee 5 dollars' or 'Earned 200'."
+                "🍄 Mycelium Till here!\n\n"
+                "Send expenses or income like:\n"
+                "• 'Coffee 5 dollars' or 'Spent 8.60 on book'\n"
+                "• 'Earned 200 from client'\n\n"
+                "🌳 Tree Till will process everything when your laptop is online!"
             )
             return "OK"
         elif text.startswith('/undo'):
             store_message(user_id, username, text, "undo_request")
-            send_telegram_message(chat_id, "📝 Undo noted!")
+            send_telegram_message(chat_id, "📝 Undo noted! Tree Till will handle it when processing.")
             return "OK"
         elif text.startswith('/whoami'):
             send_telegram_message(chat_id, f"🆔 User ID: `{user_id}`\nUsername: @{username}")
             return "OK"
 
-        # Regular messages
+        # Handle regular messages (FIXED INDENTATION)
         if not text.startswith('/'):
-    amount, description, currency, is_income = parse_financial_text(text)
-    is_income_detected, confidence = detect_income_vs_expense(text)
-    
-    # Default to expense if confidence is 0
-    if confidence == 0:
-        is_income = False
-    
-    if amount and description:
-        msg_type = "income" if is_income else "expense"
-        store_message(user_id, username, text, msg_type, amount, currency, description, is_income)
-        
-        action = "earned" if is_income else "spent"
-        emoji = "💰" if is_income else "💸"
-        
-        defaulting_msg = ""
-        if confidence == 0:
-            defaulting_msg = "\n(Defaulting to expense)"
-        
-        send_telegram_message(chat_id,
-            f"📝 {emoji} {currency} {amount:.2f} {action} on {description}{defaulting_msg}\n"
-            "🍄 Stored for Tree Till! 🌳"
-        )
-    elif amount and not description:
-        store_message(user_id, username, text, "correction", amount, currency, description, is_income)
-        action = "earned" if is_income else "spent"
-        send_telegram_message(chat_id,
-            f"✏️ Correction noted! {currency} {amount:.2f} {action}\n"
-            "🍄 Stored for Tree Till! 🌳"
-        )
-    else:
-        store_message(user_id, username, text, "unclear")
-        send_telegram_message(chat_id,
-            f"📝 Noted: '{text}' (unclear)"
-        )
+            amount, description, currency, is_income, confidence = parse_financial_text(text)
 
+            if amount and description:
+                msg_type = "income" if is_income else "expense"
+                store_message(user_id, username, text, msg_type, amount, currency, description, is_income)
+
+                action = "earned" if is_income else "spent"
+                emoji = "💰" if is_income else "💸"
+
+                # Show confidence level for debugging
+                confidence_note = ""
+                if confidence == 0:
+                    confidence_note = " (guessing expense)"
+                elif confidence == 1:
+                    confidence_note = " (low confidence)"
+
+                send_telegram_message(chat_id,
+                    f"📝 {emoji} {currency} {amount:.2f} {action} on {description}{confidence_note}\n"
+                    "🍄 Stored for Tree Till! 🌳"
+                )
+            elif amount and not description:
+                store_message(user_id, username, text, "correction", amount, currency, None, is_income)
+                action = "earned" if is_income else "spent"
+                send_telegram_message(chat_id,
+                    f"✏️ Correction noted! {currency} {amount:.2f} {action}\n"
+                    "🌳 Tree Till will fix your last transaction!"
+                )
+            else:
+                store_message(user_id, username, text, "unclear")
+                send_telegram_message(chat_id,
+                    f"📝 Noted: '{text}'\n"
+                    "🤔 Not sure if that's a transaction, but Tree Till will figure it out!"
+                )
 
         return "OK"
 
@@ -236,12 +294,77 @@ def webhook():
         print(f"Webhook error: {e}")
         return "Error", 500
 
+# API endpoints for Tree Till
+@flask_app.route('/api/pending-messages', methods=['GET'])
+def get_pending_messages():
+    try:
+        conn = sqlite3.connect('mycelium_messages.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, user_id, username, raw_message, message_type,
+                   amount, currency, description, is_income, timestamp
+            FROM pending_messages
+            WHERE processed = FALSE AND amount IS NOT NULL
+            ORDER BY timestamp ASC
+        ''')
+        results = cursor.fetchall()
+        conn.close()
+
+        messages = []
+        for row in results:
+            messages.append({
+                'id': row[0],
+                'user_id': row[1],
+                'username': row[2],
+                'raw_message': row[3],
+                'message_type': row[4],
+                'amount': row[5],
+                'currency': row[6],
+                'description': row[7],
+                'is_income': row[8],
+                'timestamp': row[9]
+            })
+        return jsonify(messages)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/api/mark-processed', methods=['POST'])
+def mark_processed():
+    try:
+        message_ids = request.json.get('message_ids', [])
+        if not message_ids:
+            return jsonify({'error': 'No message IDs provided'}), 400
+
+        conn = sqlite3.connect('mycelium_messages.db')
+        cursor = conn.cursor()
+        placeholders = ','.join(['?' for _ in message_ids])
+        cursor.execute(f'UPDATE pending_messages SET processed = TRUE WHERE id IN ({placeholders})', message_ids)
+        updated_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+
+        return jsonify({'success': True, 'updated_count': updated_count})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy', 'service': 'mycelium-till'})
+
 # Initialize DB and run app
 def main():
+    print("🍄 Mycelium Till starting up!")
     init_cloud_database()
+    
+    # Show allowed users for debugging
+    if ALLOWED_USERS:
+        print(f"🔐 Authorized users: {ALLOWED_USERS}")
+    else:
+        print("⚠️ No authorized users configured!")
+    
     port = int(os.environ.get('PORT', 8000))
+    print(f"🚀 Starting server on port {port}")
     flask_app.run(host='0.0.0.0', port=port, debug=False)
 
 if __name__ == "__main__":
     main()
-
