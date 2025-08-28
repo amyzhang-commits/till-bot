@@ -187,7 +187,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     store_message(user_id, username, "/start", "command")
     
     await update.message.reply_text(
-        "🍄 Mycelium Till here! I'm your always-listening expense tracker 🌱\n\n"
+        "🍄 Mycelium Till here! I'm your always-ready expense tracker 🌱\n\n"
         "**Just text me expenses:**\n"
         "• 'Coffee 5 dollars' or '$4.75 coffee'\n"
         "• 'Earned 500 euros from client work'\n"
