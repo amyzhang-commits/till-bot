@@ -547,7 +547,10 @@ class TreeTillProcessor:
         # Fallback to local SQLite (development mode)
         print("🔧 Using local mycelium database")
         try:
-            mycelium_db_path = '../mycelium_bot/mycelium_messages.db'
+            mycelium_db_path = os.getenv('MYCELIUM_DB_PATH', './bots/mycelium_bot/mycelium_messages.db')
+            print(f"📍 Database path: {mycelium_db_path}")
+            print(f"📍 Current directory: {os.getcwd()}")
+            print(f"📍 Database exists: {os.path.exists(mycelium_db_path)}")	
             conn = sqlite3.connect(mycelium_db_path)
             cursor = conn.cursor()
             
@@ -596,7 +599,7 @@ class TreeTillProcessor:
         
         # Fallback to local SQLite
         try:
-            mycelium_db_path = '../mycelium_bot/mycelium_messages.db'
+            mycelium_db_path = os.getenv('MYCELIUM_DB_PATH', './bots/mycelium_bot/mycelium_messages.db')
             conn = sqlite3.connect(mycelium_db_path)
             cursor = conn.cursor()
             
