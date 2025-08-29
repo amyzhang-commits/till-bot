@@ -16,7 +16,7 @@ class AssetsManager:
     
     def init_assets_database(self):
         """Initialize the assets database with Education Fund support"""
-        conn = sqlite3.connect('assets.db')
+        conn = sqlite3.connect(os.getenv('ASSETS_DB_PATH', 'assets.db'))
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -79,7 +79,7 @@ class AssetsManager:
     def get_latest_snapshot(self) -> Optional[Dict]:
         """Get the most recent asset snapshot"""
         try:
-            conn = sqlite3.connect('assets.db')
+            conn = sqlite3.connect(os.getenv('ASSETS_DB_PATH', 'assets.db'))
             cursor = conn.cursor()
             
             cursor.execute('''
@@ -134,10 +134,13 @@ class AssetsManager:
         previous = self.get_latest_snapshot()
         
         if previous:
-            prev_date = previous['snapshot_date']
-            prev_net_worth = previous['net_worth']
-            print(f"💫 Last update: {prev_date} (Net Worth: ${prev_net_worth:,.2f})")
-            print("🌱 Let's see how your financial forest has grown!")
+           prev_date = previous['snapshot_date']
+           prev_net_worth = previous.get('net_worth')
+           if prev_net_worth is not None:
+               print(f"💫 Last update: {prev_date} (Net Worth: ${prev_net_worth:,.2f})")
+           else:
+               print(f"💫 Last update: {prev_date} (Net Worth: not recorded)")
+           print("🌱 Let's see how your financial forest has grown!")
         else:
             print("🌱 Welcome to your first financial forest survey!")
         
@@ -374,7 +377,7 @@ class AssetsManager:
                          if k not in ['id', 'created_at']}
             
             # Save to database
-            conn = sqlite3.connect('assets.db')
+            conn = sqlite3.connect(os.getenv('ASSETS_DB_PATH', 'assets.db'))
             cursor = conn.cursor()
             
             # Build dynamic insert query with clean data
@@ -482,7 +485,7 @@ class TreeTillProcessor:
     
     def init_tree_database(self):
         """Initialize the Tree Till database for processed transactions"""
-        conn = sqlite3.connect('tree_till.db')
+        conn = sqlite3.connect(os.getenv('TREE_TILL_DB_PATH', 'tree_till.db'))
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -707,7 +710,7 @@ Category:"""
                                  raw_message: str) -> bool:
         """Save processed transaction to tree_till.db"""
         try:
-            conn = sqlite3.connect('tree_till.db')
+            conn = sqlite3.connect(os.getenv('TREE_TILL_DB_PATH', 'tree_till.db'))
             cursor = conn.cursor()
             
             cursor.execute('''
@@ -789,7 +792,7 @@ Category:"""
     def show_tree_stats(self):
         """Show statistics from the tree database"""
         try:
-            conn = sqlite3.connect('tree_till.db')
+            conn = sqlite3.connect(os.getenv('TREE_TILL_DB_PATH', 'tree_till.db'))
             cursor = conn.cursor()
             
             # Total counts
