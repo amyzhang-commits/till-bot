@@ -781,13 +781,97 @@ Category:"""
             print(f"❌ Error saving transaction: {e}")
             return False
     
+    def handle_correction(self, user_id: int, new_amount: float, currency: str) -> bool:
+        """Update the most recent transaction for this user"""
+        try:
+            conn = sqlite3.connect(self.tree_db_path)
+            cursor = conn.cursor()
+            
+            # Find the most recent transaction for this user
+            cursor.execute('''
+            SELECT id, amount, description, category, is_income
+            FROM transactions 
+            WHERE user_id = ?
+            ORDER BY processed_at DESC, id DESC
+            LIMIT 1
+            ''', (user_id,))
+            
+            last_transaction = cursor.fetchone()
+            
+            if not last_transaction:
+                print("   ❌ No previous transaction found to correct")
+                conn.close()
+                return False
+            
+            transaction_id, old_amount, description, old_category, is_income = last_transaction
+            
+            print(f"   🔍 Found transaction: ${old_amount:.2f} for {description}")
+            print(f"   ✏️ Updating to: ${new_amount:.2f}")
+            
+            # Update the transaction
+            cursor.execute('''
+            UPDATE transactions 
+            SET amount = ?, currency = ?, processed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ''', (new_amount, currency, transaction_id))
+            
+            conn.commit()
+            conn.close()
+            
+            print(f"   ✅ Correction applied!")
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Error handling correction: {e}")
+            return False
+    
+    def handle_undo(self, user_id: int) -> bool:
+        """Delete the most recent transaction for this user"""
+        try:
+            conn = sqlite3.connect(self.tree_db_path)
+            cursor = conn.cursor()
+            
+            # Find the most recent transaction for this user
+            cursor.execute('''
+            SELECT id, amount, description, category
+            FROM transactions 
+            WHERE user_id = ?
+            ORDER BY processed_at DESC, id DESC
+            LIMIT 1
+            ''', (user_id,))
+            
+            last_transaction = cursor.fetchone()
+            
+            if not last_transaction:
+                print("   ❌ No transaction found to undo")
+                conn.close()
+                return False
+            
+            transaction_id, amount, description, category = last_transaction
+            
+            print(f"   🔍 Found transaction: ${amount:.2f} for {description} ({category})")
+            print(f"   🗑️ Removing transaction...")
+            
+            # Delete the transaction
+            cursor.execute('DELETE FROM transactions WHERE id = ?', (transaction_id,))
+            
+            conn.commit()
+            conn.close()
+            
+            print(f"   ✅ Transaction undone!")
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Error handling undo: {e}")
+            return False
+    
     def process_pending_messages(self) -> bool:
-        """Main processing function - the Tree Till awakening!"""
+        """Main processing function with correction/undo support"""
         print("🌳 TREE TILL AWAKENING! 🌳")
         print("🍄 Syncing with mycelium network...")
         
         # Detect mode
-        mode = "☁️  Railway Cloud" if self.mycelium_api_url else "💻 Local Development"
+        mode = "☁️ Railway Cloud" if self.mycelium_api_url else "💻 Local Development"
         print(f"🔧 Mode: {mode}")
         
         # Get pending messages
@@ -798,7 +882,7 @@ Category:"""
             print("🌿 The forest is peaceful... all transactions processed!")
             return False
         
-        print(f"🧠 Found {len(pending)} transactions to process with Gemma3n")
+        print(f"🧠 Found {len(pending)} messages to process")
         print("=" * 60)
         
         success_count = 0
@@ -809,6 +893,28 @@ Category:"""
              amount, currency, description, is_income, timestamp) = msg_data
             
             print(f"\n📝 Processing: {raw_message}")
+            print(f"   🔍 Type: {msg_type}")
+            
+            # Handle special message types
+            if msg_type == "correction":
+                if self.handle_correction(user_id, amount, currency):
+                    processed_ids.append(mycelium_id)
+                    success_count += 1
+                continue
+                
+            elif msg_type == "undo_request":
+                if self.handle_undo(user_id):
+                    processed_ids.append(mycelium_id)
+                    success_count += 1
+                continue
+            
+            elif msg_type in ["command", "unclear"]:
+                # Skip commands and unclear messages
+                processed_ids.append(mycelium_id)
+                print(f"   ⏭️ Skipping {msg_type} message")
+                continue
+            
+            # Handle regular transactions (income/expense)
             type_emoji = "💰" if is_income else "💸"
             print(f"   {type_emoji} Parsed: {currency} {amount:.2f} - {description}")
             
@@ -832,15 +938,16 @@ Category:"""
         # Mark all successfully processed messages in one batch
         if processed_ids:
             if self.mark_mycelium_processed(processed_ids):
-                print(f"🔄 Successfully synced {len(processed_ids)} transactions with mycelium")
+                print(f"🔄 Successfully synced {len(processed_ids)} messages with mycelium")
             else:
-                print(f"⚠️  Transactions saved locally but sync with mycelium failed")
+                print(f"⚠️ Messages processed locally but sync with mycelium failed")
         
         print("\n" + "=" * 60)
-        print(f"🎉 Tree Till processed {success_count}/{len(pending)} transactions!")
+        print(f"🎉 Tree Till processed {success_count}/{len(pending)} messages!")
         print("🌲 The forest grows wiser with each transaction!")
         
         return success_count > 0
+
     
     def show_tree_stats(self):
         """Show statistics from the tree database"""
