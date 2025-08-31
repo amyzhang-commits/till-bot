@@ -417,9 +417,6 @@ def webhook():
                 "• `Earned 200 from client`\n"
                 "• `Actually 12.50` (to correct last amount)\n\n"
                 "*Commands:*\n"
-                "• `/stats` - Today's summary\n"
-                "• `/week` - Last 7 days\n"
-                "• `/month` - Last 30 days\n"
                 "• `/undo` - Mark last transaction for removal\n\n"
                 "🌳 Tree Till will process everything when your laptop is online!"
             )
@@ -434,76 +431,6 @@ def webhook():
             send_telegram_message(chat_id, f"🆔 User ID: `{user_id}`\nUsername: @{username}")
             return "OK"
             
-        elif text.startswith('/stats'):
-            stats = get_stats(user_id, 1)  # Today only
-            if stats and stats['transactions'] > 0:
-                net_emoji = "📈" if stats['net'] >= 0 else "📉"
-                response = (
-                    f"📊 *Today's Summary:*\n"
-                    f"💸 Spent: ${stats['spent']:.2f}\n"
-                    f"💰 Earned: ${stats['earned']:.2f}\n"
-                    f"{net_emoji} Net: ${stats['net']:+.2f}\n"
-                    f"📝 Transactions: {stats['transactions']}"
-                )
-            else:
-                response = "📊 No transactions recorded today yet!"
-            
-            send_telegram_message(chat_id, response)
-            return "OK"
-            
-        elif text.startswith('/week'):
-            stats = get_stats(user_id, 7)
-            categories = get_category_stats(user_id, 7)
-            
-            if stats and stats['transactions'] > 0:
-                net_emoji = "📈" if stats['net'] >= 0 else "📉"
-                response = (
-                    f"📊 *Last 7 Days:*\n"
-                    f"💸 Spent: ${stats['spent']:.2f}\n"
-                    f"💰 Earned: ${stats['earned']:.2f}\n"
-                    f"{net_emoji} Net: ${stats['net']:+.2f}\n"
-                    f"📝 Transactions: {stats['transactions']}\n\n"
-                )
-                
-                # Add top categories (max 3)
-                if categories:
-                    response += "*Top categories:*\n"
-                    sorted_cats = sorted(categories.items(), key=lambda x: x[1]['total'], reverse=True)
-                    for cat, data in sorted_cats[:3]:
-                        if not cat.startswith("💰"):  # Skip income for expense list
-                            response += f"{cat}: ${data['total']:.2f} ({data['count']}x)\n"
-            else:
-                response = "📊 No transactions in the last 7 days!"
-                
-            send_telegram_message(chat_id, response)
-            return "OK"
-            
-        elif text.startswith('/month'):
-            stats = get_stats(user_id, 30)
-            categories = get_category_stats(user_id, 30)
-            
-            if stats and stats['transactions'] > 0:
-                net_emoji = "📈" if stats['net'] >= 0 else "📉"
-                response = (
-                    f"📊 *Last 30 Days:*\n"
-                    f"💸 Spent: ${stats['spent']:.2f}\n"
-                    f"💰 Earned: ${stats['earned']:.2f}\n"
-                    f"{net_emoji} Net: ${stats['net']:+.2f}\n"
-                    f"📝 Transactions: {stats['transactions']}\n\n"
-                )
-                
-                # Add top categories
-                if categories:
-                    response += "*Top categories:*\n"
-                    sorted_cats = sorted(categories.items(), key=lambda x: x[1]['total'], reverse=True)
-                    for cat, data in sorted_cats[:4]:
-                        if not cat.startswith("💰"):
-                            response += f"{cat}: ${data['total']:.2f} ({data['count']}x)\n"
-            else:
-                response = "📊 No transactions in the last 30 days!"
-                
-            send_telegram_message(chat_id, response)
-            return "OK"
 
         # Handle regular messages
         if not text.startswith('/'):
