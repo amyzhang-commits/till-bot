@@ -1,6 +1,8 @@
 import requests
 import json
 import sqlite3
+import os
+from pathlib import Path
 from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional
 
@@ -8,11 +10,32 @@ class DappleTillConversation:
     def __init__(self, model_name="gemma3n:latest", base_url="http://localhost:11434"):
         self.model_name = model_name
         self.base_url = base_url
+        
+        # Get the directory where this script is located
+        self.script_dir = Path(__file__).parent.absolute()
+        
+        # Define database paths relative to script location
+        self.assets_db_path = self.script_dir / 'assets.db'
+        self.tree_db_path = self.script_dir / 'tree_till.db'
+        
+        # Check if databases exist and only show paths if there's a problem
+        missing_dbs = []
+        if not self.assets_db_path.exists():
+            missing_dbs.append(f"assets.db (expected at {self.assets_db_path})")
+        if not self.tree_db_path.exists():
+            missing_dbs.append(f"tree_till.db (expected at {self.tree_db_path})")
+        
+        if missing_dbs:
+            print(f"⚠️  Warning: Missing databases:")
+            for db in missing_dbs:
+                print(f"   📁 {db}")
+        else:
+            print(f"🌿 Database connections ready!")
     
     def get_latest_assets(self) -> Optional[Dict]:
         """Get the most recent asset snapshot"""
         try:
-            conn = sqlite3.connect('assets.db')
+            conn = sqlite3.connect(str(self.assets_db_path))
             cursor = conn.cursor()
             
             cursor.execute('''
@@ -41,7 +64,7 @@ class DappleTillConversation:
     def get_recent_expenses(self, days: int = 30) -> List[Dict]:
         """Get recent expenses from tree_till.db"""
         try:
-            conn = sqlite3.connect('tree_till.db')
+            conn = sqlite3.connect(str(self.tree_db_path))
             cursor = conn.cursor()
             
             # Get expenses from last N days
@@ -74,7 +97,7 @@ class DappleTillConversation:
         except Exception as e:
             print(f"❌ Error getting expenses: {e}")
             return []
-    
+
     def build_context_prompt(self, user_question: str) -> str:
         """Build the context-rich prompt for Dapple Till"""
         
@@ -82,13 +105,26 @@ class DappleTillConversation:
         assets = self.get_latest_assets()
         recent_expenses = self.get_recent_expenses(30)
         
-        # Build the comprehensive prompt
+        # Calculate debt values BEFORE the f-string with safe conversion
+        try:
+            credit_balance = float(assets.get('boa_credit_balance', 0) or 0) if assets else 0
+        except (ValueError, TypeError):
+            credit_balance = 0
+
+        try:
+            other_debts = float(assets.get('other_debts', 0) or 0) if assets else 0
+        except (ValueError, TypeError):
+            other_debts = 0
+            
+        total_debt = credit_balance + other_debts
+        
         prompt = f"""You are Dapple Till, a witty financial garden spirit. 
-You always respond in a short poetic form — haiku, limerick, or rhyming couplet. 
+You always respond in poetic form – haiku, limerick, or rhyming verse. 
 Your poems should sound clever, encouraging, and a bit tongue-in-cheek. 
 They must include at least one concrete number or metric from the "Financial Context."
+Calculate relationships between numbers - percentages, ratios, comparisons - to make the data meaningful.
 Never invent numbers. Always use the ones given.
-Keep the poem light but not dismissive — humorous wisdom with a grounding in truth.
+Keep the poem light but not dismissive – humorous wisdom with a grounding in truth.
 
 After your poem, end with "Consider these questions:" followed by exactly three practical questions related to their message that would help them reflect further or research their situation. End the final question with a small leaf emoji 🌱
 
@@ -107,7 +143,7 @@ CURRENT FINANCIAL SNAPSHOT:"""
    - Brokerage: ${assets.get('vanguard_brokerage', 0):,.2f}
    - HSA Invested: ${assets.get('hsa_invested', 0):,.2f}
 
-💳 DEBTS: ${(assets.get('boa_credit_balance', 0) + assets.get('other_debts', 0)):,.2f}
+💳 DEBTS: ${total_debt:,.2f}
 
 🏥 HSA TOTAL: ${(assets.get('hsa_cash', 0) + assets.get('hsa_invested', 0)):,.2f}"""
 
@@ -168,8 +204,9 @@ Respond as Dapple Till with warmth, wisdom, and specific insights based on their
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "temperature": 0.7,  # More creative for conversation
-                        "num_predict": 400   # Longer responses for conversation
+                        "temperature": 0.9,  # Higher creativity for more varied responses
+                        "num_predict": 500,  # Allow longer, more elaborate poems
+                        "top_p": 0.9        # Add nucleus sampling for more variety
                     }
                 },
                 timeout=60
@@ -190,7 +227,7 @@ def main():
     print("🌿 DAPPLE TILL 🌿")
     print("="*60)
     print("💫 Hello! I'm Dapple Till, your wise financial advisor.")
-    print("📝 I know your complete financial picture and spending patterns.")
+    print("🔍 I know your complete financial picture and spending patterns.")
     print("🌱 Ask me anything about your finances - spending, saving, planning!")
     print("\n💡 Try things like:")
     print("   • 'I spent $200 on dining this week, is that okay?'")

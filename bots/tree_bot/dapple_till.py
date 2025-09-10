@@ -5,9 +5,53 @@ import os
 from pathlib import Path
 from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional
+from contextlib import contextmanager
+
+# Import our shared configuration and helpers
+try:
+    from .config import (
+        DEFAULT_OLLAMA_BASE_URL, DEFAULT_MODEL_NAME, OLLAMA_TIMEOUT,
+        ASSETS_COLUMNS, ASSETS_NUMERIC_FIELDS
+    )
+    from .main import ValidationHelpers
+except ImportError:
+    # Fallback for direct execution
+    from config import (
+        DEFAULT_OLLAMA_BASE_URL, DEFAULT_MODEL_NAME, OLLAMA_TIMEOUT,
+        ASSETS_COLUMNS, ASSETS_NUMERIC_FIELDS
+    )
+    from main import ValidationHelpers
+
+
+# =======================
+# DATABASE CONTEXT MANAGER
+# =======================
+
+@contextmanager
+def get_db_connection(db_path):
+    """
+    Context manager for database connections.
+    Ensures connections are properly closed even if errors occur.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        yield conn
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise e
+    finally:
+        if conn:
+            conn.close()
 
 class DappleTillConversation:
-    def __init__(self, model_name="gemma3n:latest", base_url="http://localhost:11434"):
+    """
+    Dapple Till - The wise financial garden spirit that provides poetic financial advice.
+    Now enhanced with proper multi-currency handling and optimized database operations.
+    """
+    
+    def __init__(self, model_name=DEFAULT_MODEL_NAME, base_url=DEFAULT_OLLAMA_BASE_URL):
         self.model_name = model_name
         self.base_url = base_url
         
@@ -33,77 +77,87 @@ class DappleTillConversation:
             print(f"🌿 Database connections ready!")
     
     def get_latest_assets(self) -> Optional[Dict]:
-        """Get the most recent asset snapshot"""
+        """Get the most recent asset snapshot with proper column mapping and validation"""
         try:
-            conn = sqlite3.connect(str(self.assets_db_path))
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-            SELECT * FROM asset_snapshots 
-            ORDER BY snapshot_date DESC, created_at DESC 
-            LIMIT 1
-            ''')
-            
-            row = cursor.fetchone()
-            conn.close()
-            
-            if row:
-                columns = [
-                    'id', 'snapshot_date', 'boa_checking', 'boa_credit_balance',
-                    'ufb_savings', 'vanguard_roth_ira', 'vanguard_brokerage',
-                    'hsa_cash', 'hsa_invested', 'hsa_notes', 'other_assets',
-                    'other_debts', 'total_liquid', 'total_invested', 'net_worth',
-                    'update_type', 'notes', 'created_at'
-                ]
-                return dict(zip(columns, row))
-            return None
+            with get_db_connection(str(self.assets_db_path)) as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute('''
+                SELECT * FROM asset_snapshots 
+                ORDER BY snapshot_date DESC, created_at DESC 
+                LIMIT 1
+                ''')
+                
+                row = cursor.fetchone()
+                
+                if row:
+                    # Use the centralized column mapping from config
+                    data = dict(zip(ASSETS_COLUMNS, row))
+                    
+                    # Use the helper method to convert numeric fields safely
+                    data = ValidationHelpers.convert_numeric_fields(data, ASSETS_NUMERIC_FIELDS)
+                    
+                    return data
+                return None
         except Exception as e:
             print(f"❌ Error getting assets: {e}")
             return None
     
-    def get_recent_expenses(self, days: int = 30) -> List[Dict]:
-        """Get recent expenses from tree_till.db"""
+    def get_recent_transactions(self, days: int = 30) -> List[Dict]:
+        """Get recent transactions from tree_till.db with proper database handling"""
         try:
-            conn = sqlite3.connect(str(self.tree_db_path))
-            cursor = conn.cursor()
-            
-            # Get expenses from last N days
-            cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
-            
-            cursor.execute('''
-            SELECT amount, description, category, currency, is_income, 
-                   timestamp, raw_message
-            FROM transactions 
-            WHERE timestamp >= ?
-            ORDER BY timestamp DESC
-            ''', (cutoff_date,))
-            
-            rows = cursor.fetchall()
-            conn.close()
-            
-            expenses = []
-            for row in rows:
-                expenses.append({
-                    'amount': row[0],
-                    'description': row[1], 
-                    'category': row[2],
-                    'currency': row[3],
-                    'is_income': row[4],
-                    'timestamp': row[5],
-                    'raw_message': row[6]
-                })
-            
-            return expenses
+            with get_db_connection(str(self.tree_db_path)) as conn:
+                cursor = conn.cursor()
+                
+                # Get transactions from last N days
+                cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+                
+                cursor.execute('''
+                SELECT amount, description, category, currency, is_income, 
+                       timestamp, raw_message
+                FROM transactions 
+                WHERE timestamp >= ?
+                ORDER BY timestamp DESC
+                ''', (cutoff_date,))
+                
+                rows = cursor.fetchall()
+                
+                transactions = []
+                for row in rows:
+                    transactions.append({
+                        'amount': row[0],
+                        'description': row[1], 
+                        'category': row[2],
+                        'currency': row[3],
+                        'is_income': row[4],
+                        'timestamp': row[5],
+                        'raw_message': row[6]
+                    })
+                
+                return transactions
         except Exception as e:
-            print(f"❌ Error getting expenses: {e}")
+            print(f"❌ Error getting transactions: {e}")
             return []
-    
+
     def build_context_prompt(self, user_question: str) -> str:
         """Build the context-rich prompt for Dapple Till"""
         
         # Get current financial data
         assets = self.get_latest_assets()
-        recent_expenses = self.get_recent_expenses(30)
+        recent_transactions = self.get_recent_transactions(30)
+        
+        # Calculate debt values BEFORE the f-string with safe conversion
+        try:
+            credit_balance = float(assets.get('boa_credit_balance', 0) or 0) if assets else 0
+        except (ValueError, TypeError):
+            credit_balance = 0
+
+        try:
+            other_debts = float(assets.get('other_debts', 0) or 0) if assets else 0
+        except (ValueError, TypeError):
+            other_debts = 0
+            
+        total_debt = credit_balance + other_debts
         
         prompt = f"""You are Dapple Till, a witty financial garden spirit. 
 You always respond in poetic form – haiku, limerick, or rhyming verse. 
@@ -130,7 +184,7 @@ CURRENT FINANCIAL SNAPSHOT:"""
    - Brokerage: ${assets.get('vanguard_brokerage', 0):,.2f}
    - HSA Invested: ${assets.get('hsa_invested', 0):,.2f}
 
-💳 DEBTS: ${(assets.get('boa_credit_balance', 0) + assets.get('other_debts', 0)):,.2f}
+💳 DEBTS: ${total_debt:,.2f}
 
 🏥 HSA TOTAL: ${(assets.get('hsa_cash', 0) + assets.get('hsa_invested', 0)):,.2f}"""
 
@@ -141,24 +195,41 @@ CURRENT FINANCIAL SNAPSHOT:"""
             emergency_months = assets['total_liquid'] / 3000
             prompt += f"\n🛡️ EMERGENCY FUND: ~{emergency_months:.1f} months of coverage"
 
-        # Add recent spending context
-        if recent_expenses:
-            total_expenses = sum(e['amount'] for e in recent_expenses if not e['is_income'])
-            total_income = sum(e['amount'] for e in recent_expenses if e['is_income'])
+        # Add recent spending context with proper multi-currency handling
+        if recent_transactions:
+            # Group transactions by currency to avoid meaningless mixed-currency sums
+            currency_summary = {}
+            for transaction in recent_transactions:
+                currency = transaction['currency']
+                if currency not in currency_summary:
+                    currency_summary[currency] = {'expenses': 0, 'income': 0, 'count': 0}
+                
+                if transaction['is_income']:
+                    currency_summary[currency]['income'] += transaction['amount']
+                else:
+                    currency_summary[currency]['expenses'] += transaction['amount']
+                currency_summary[currency]['count'] += 1
             
             prompt += f"""
 
-RECENT SPENDING (Last 30 days):
-💸 Total Expenses: ${total_expenses:,.2f}
-💰 Total Income: ${total_income:,.2f}
-📊 Net: ${total_income - total_expenses:+,.2f}
+RECENT SPENDING (Last 30 days) - BY CURRENCY:"""
+            
+            for currency, totals in currency_summary.items():
+                net_position = totals['income'] - totals['expenses']
+                prompt += f"""
+💵 {currency}:
+  💸 Expenses: {totals['expenses']:,.2f}
+  💰 Income: {totals['income']:,.2f}
+  🎯 Net: {net_position:+,.2f} ({totals['count']} transactions)"""
+            
+            prompt += f"""
 
 Recent transactions:"""
             
-            # Show last 10 transactions for context
-            for expense in recent_expenses[:10]:
-                emoji = "💰" if expense['is_income'] else "💸"
-                prompt += f"\n{emoji} {expense['currency']} {expense['amount']:.2f} - {expense['category']} - {expense['description']}"
+            # Show last 10 transactions for context, grouped by currency
+            for transaction in recent_transactions[:10]:
+                emoji = "💰" if transaction['is_income'] else "💸"
+                prompt += f"\n{emoji} {transaction['currency']} {transaction['amount']:.2f} - {transaction['category']} - {transaction['description']}"
 
         prompt += f"""
 
@@ -196,7 +267,7 @@ Respond as Dapple Till with warmth, wisdom, and specific insights based on their
                         "top_p": 0.9        # Add nucleus sampling for more variety
                     }
                 },
-                timeout=60
+                timeout=OLLAMA_TIMEOUT  # Use centralized timeout constant
             )
             
             if response.status_code == 200:
@@ -229,15 +300,15 @@ def main():
     
     # Check if we have financial data
     assets = dapple_till.get_latest_assets()
-    recent_expenses = dapple_till.get_recent_expenses()
+    recent_transactions = dapple_till.get_recent_transactions()
     
     if not assets:
         print("🌱 I notice you haven't done an assets check-in yet!")
         print("💡 Run 'python main.py' first so I know your complete financial picture.")
         return
     
-    if not recent_expenses:
-        print("🍄 I don't see any processed expenses yet!")
+    if not recent_transactions:
+        print("🍄 I don't see any processed transactions yet!")
         print("💡 Make sure you've run 'python main.py' to process your spending data.")
         print("🌿 I can still chat about your assets though!\n")
     
