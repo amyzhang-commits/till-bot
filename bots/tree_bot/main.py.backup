@@ -7,300 +7,12 @@ from datetime import datetime, date
 from typing import Optional, List, Tuple, Dict
 from dotenv import load_dotenv
 from pathlib import Path
-from contextlib import contextmanager
-
-# Import our configuration
-try:
-    from .config import (
-        TRANSACTION_CATEGORIES, MYCELIUM_DB_PATHS, DEFAULT_OLLAMA_BASE_URL,
-        DEFAULT_MODEL_NAME, API_TIMEOUT, OLLAMA_TIMEOUT, ASSETS_NUMERIC_FIELDS,
-        ASSETS_COLUMNS
-    )
-except ImportError:
-    # Fallback for direct execution
-    from config import (
-        TRANSACTION_CATEGORIES, MYCELIUM_DB_PATHS, DEFAULT_OLLAMA_BASE_URL,
-        DEFAULT_MODEL_NAME, API_TIMEOUT, OLLAMA_TIMEOUT, ASSETS_NUMERIC_FIELDS,
-        ASSETS_COLUMNS
-    )
 
 # Load environment variables
 load_dotenv()
 
 # Get the directory where this script is located for reliable database paths
 SCRIPT_DIR = Path(__file__).parent.absolute()
-
-
-# =======================
-# HELPER CLASSES & UTILITIES
-# =======================
-
-class DatabasePathResolver:
-    """
-    Utility class to resolve database paths consistently.
-    This eliminates the duplicate path-finding logic that was scattered throughout the code.
-    """
-    
-    @staticmethod
-    def find_mycelium_db() -> Optional[str]:
-        """
-        Find the mycelium database by checking multiple possible paths.
-        Returns the first valid path found, or None if no database is found.
-        """
-        for path in MYCELIUM_DB_PATHS:
-            if os.path.exists(path):
-                return path
-        return None
-
-
-class MyceliumAPIClient:
-    """
-    Unified API client for interacting with the Mycelium Railway API.
-    This consolidates all the API calls and error handling that was duplicated before.
-    """
-    
-    def __init__(self, base_url: Optional[str] = None):
-        self.base_url = base_url
-        self.db_resolver = DatabasePathResolver()
-    
-    def get_pending_messages(self) -> List[Tuple]:
-        """
-        Get unprocessed messages - tries Railway API first, falls back to local SQLite.
-        Returns a list of tuples containing message data.
-        """
-        # Try Railway API first
-        if self.base_url:
-            try:
-                print(f"🚀 Fetching from Railway API: {self.base_url}")
-                response = requests.get(
-                    f"{self.base_url}/api/pending-messages",
-                    timeout=API_TIMEOUT
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    print(f"☁️  Got {len(data)} messages from Railway")
-                    
-                    # Convert JSON back to tuple format expected by the processor
-                    results = []
-                    for msg in data:
-                        results.append((
-                            msg['id'], msg['user_id'], msg['username'],
-                            msg['raw_message'], msg['message_type'], msg['amount'],
-                            msg['currency'], msg['description'], msg['is_income'],
-                            msg['timestamp']
-                        ))
-                    return results
-                else:
-                    print(f"⚠️  Railway API error {response.status_code}, falling back to local")
-                    
-            except Exception as e:
-                print(f"⚠️  Railway API connection failed: {e}, falling back to local")
-        
-        # Fallback to local SQLite database
-        return self._get_local_messages()
-    
-    def _get_local_messages(self) -> List[Tuple]:
-        """
-        Get messages from local SQLite database (development mode).
-        Private method used as fallback when Railway API is unavailable.
-        """
-        print("💻 Using local mycelium database")
-        
-        mycelium_db_path = self.db_resolver.find_mycelium_db()
-        if not mycelium_db_path:
-            print("❌ Could not find mycelium database file")
-            return []
-        
-        try:
-            print(f"🗄️  Database path: {mycelium_db_path}")
-            with sqlite3.connect(mycelium_db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                SELECT id, user_id, username, raw_message, message_type, 
-                       amount, currency, description, is_income, timestamp
-                FROM pending_messages 
-                WHERE processed = FALSE AND amount IS NOT NULL
-                ORDER BY timestamp ASC
-                ''')
-                
-                results = cursor.fetchall()
-                print(f"📥 Got {len(results)} messages from local database")
-                return results
-                
-        except Exception as e:
-            print(f"❌ Error reading local mycelium messages: {e}")
-            return []
-    
-    def mark_messages_processed(self, message_ids: List[int]) -> bool:
-        """
-        Mark messages as processed - tries Railway API first, falls back to local SQLite.
-        Returns True if successful, False otherwise.
-        """
-        if not message_ids:
-            return True
-        
-        # Try Railway API first
-        if self.base_url:
-            try:
-                response = requests.post(
-                    f"{self.base_url}/api/mark-processed",
-                    json={'message_ids': message_ids},
-                    timeout=API_TIMEOUT
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    updated_count = result.get('updated_count', 0)
-                    print(f"☁️  Railway: Marked {updated_count} messages as processed")
-                    return updated_count > 0
-                else:
-                    print(f"⚠️  Railway mark-processed error {response.status_code}, falling back to local")
-                    
-            except Exception as e:
-                print(f"⚠️  Railway mark-processed failed: {e}, falling back to local")
-        
-        # Fallback to local SQLite
-        return self._mark_local_messages_processed(message_ids)
-    
-    def _mark_local_messages_processed(self, message_ids: List[int]) -> bool:
-        """
-        Mark messages as processed in local SQLite database.
-        Private method used as fallback when Railway API is unavailable.
-        """
-        mycelium_db_path = self.db_resolver.find_mycelium_db()
-        if not mycelium_db_path:
-            print("❌ Could not find mycelium database file")
-            return False
-        
-        try:
-            with sqlite3.connect(mycelium_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # Mark multiple messages as processed using a parameterized query
-                placeholders = ','.join(['?' for _ in message_ids])
-                cursor.execute(
-                    f'UPDATE pending_messages SET processed = TRUE WHERE id IN ({placeholders})',
-                    message_ids
-                )
-                
-                updated = cursor.rowcount
-                conn.commit()
-                
-                print(f"💻 Local: Marked {updated} messages as processed")
-                return updated > 0
-                
-        except Exception as e:
-            print(f"❌ Error marking local messages as processed: {e}")
-            return False
-
-
-class ValidationHelpers:
-    """
-    Helper methods for common validation patterns used throughout the application.
-    This consolidates validation logic that was repeated in multiple places.
-    """
-    
-    @staticmethod
-    def parse_amount(input_str: str) -> Optional[float]:
-        """
-        Parse various amount formats: '$1,234.56', '1234.56', 'about 1200', etc.
-        Returns None if the input indicates no change or is invalid.
-        """
-        if not input_str or input_str.lower().strip() in ['', 'skip', 'same', 'unchanged']:
-            return None
-        
-        # Clean the input by removing common formatting
-        cleaned = input_str.lower().strip()
-        cleaned = re.sub(r'[,$]', '', cleaned)  # Remove $ and commas
-        cleaned = re.sub(r'about|around|roughly|approximately', '', cleaned).strip()
-        
-        # Extract the first number found in the cleaned string
-        match = re.search(r'(\d+(?:\.\d{2})?)', cleaned)
-        if match:
-            try:
-                return float(match.group(1))
-            except ValueError:
-                return None
-        return None
-    
-    @staticmethod
-    def get_user_choice(prompt: str, valid_choices: List[str], case_sensitive: bool = False) -> str:
-        """
-        Get a validated choice from the user.
-        Keeps asking until a valid choice is provided.
-        
-        Args:
-            prompt: The prompt to show the user
-            valid_choices: List of acceptable choices
-            case_sensitive: Whether to enforce case sensitivity
-        
-        Returns:
-            The validated user choice
-        """
-        while True:
-            choice = input(prompt).strip()
-            
-            if not case_sensitive:
-                choice = choice.lower()
-                valid_choices = [c.lower() for c in valid_choices]
-            
-            if choice in valid_choices:
-                return choice
-            
-            print(f"🤔 Please choose from: {', '.join(valid_choices)}")
-    
-    @staticmethod
-    def convert_numeric_fields(data: Dict, field_names: List[str]) -> Dict:
-        """
-        Convert specified fields from strings to floats, with error handling.
-        This was previously done inline with lots of repetition.
-        
-        Args:
-            data: Dictionary containing the data
-            field_names: List of field names to convert to floats
-        
-        Returns:
-            The data dictionary with converted fields
-        """
-        for field in field_names:
-            if data.get(field) is not None:
-                try:
-                    data[field] = float(data[field])
-                except (ValueError, TypeError):
-                    data[field] = 0.0
-        return data
-
-
-# =======================
-# DATABASE CONTEXT MANAGER
-# =======================
-
-from contextlib import contextmanager
-
-@contextmanager
-def get_db_connection(db_path):
-    """
-    Context manager for database connections.
-    Ensures connections are properly closed even if errors occur.
-    This replaces the repetitive conn.close() calls throughout the code.
-    """
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        yield conn
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        raise e
-    finally:
-        if conn:
-            conn.close()
-
-
-# =======================
-# MAIN CLASSES
-# =======================
 
 class AssetsManager:
     def __init__(self):
@@ -310,8 +22,8 @@ class AssetsManager:
     
     def init_assets_database(self):
         """Initialize the assets database with Education Fund support"""
-        with get_db_connection(self.assets_db_path) as conn:
-            cursor = conn.cursor()
+        conn = sqlite3.connect(self.assets_db_path)
+        cursor = conn.cursor()
         
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS asset_snapshots (
@@ -366,39 +78,73 @@ class AssetsManager:
             cursor.execute('ALTER TABLE asset_snapshots ADD COLUMN education_notes TEXT')
             print("📚 Added education_notes column")
         
-            conn.commit()
+        conn.commit()
+        conn.close()
         print("🗄️  Assets database initialized!")
     
     def get_latest_snapshot(self) -> Optional[Dict]:
         """Get the most recent asset snapshot with proper type conversion"""
         try:
-            with get_db_connection(self.assets_db_path) as conn:
-                cursor = conn.cursor()
+            conn = sqlite3.connect(self.assets_db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+            SELECT * FROM asset_snapshots 
+            ORDER BY snapshot_date DESC, created_at DESC 
+            LIMIT 1
+            ''')
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                columns = [
+                    'id', 'snapshot_date', 'boa_checking', 'boa_credit_balance',
+                    'ufb_savings', 'vanguard_roth_ira', 'vanguard_brokerage',
+                    'hsa_cash', 'hsa_invested', 'hsa_notes', 'education_fund', 
+                    'education_notes', 'other_assets', 'other_debts', 
+                    'total_liquid', 'total_invested', 'net_worth',
+                    'update_type', 'notes', 'created_at'
+                ]
+                data = dict(zip(columns, row))
                 
-                cursor.execute('''
-                SELECT * FROM asset_snapshots 
-                ORDER BY snapshot_date DESC, created_at DESC 
-                LIMIT 1
-                ''')
+                # Convert numeric fields from strings to floats for proper formatting
+                numeric_fields = ['boa_checking', 'boa_credit_balance', 'ufb_savings', 
+                                 'vanguard_roth_ira', 'vanguard_brokerage', 'hsa_cash', 
+                                 'hsa_invested', 'education_fund', 'other_assets', 
+                                 'other_debts', 'total_liquid', 'total_invested', 'net_worth']
                 
-                row = cursor.fetchone()
+                for field in numeric_fields:
+                    if data.get(field) is not None:
+                        try:
+                            data[field] = float(data[field])
+                        except (ValueError, TypeError):
+                            data[field] = 0.0
                 
-                if row:
-                    # Use the centralized column mapping from config
-                    data = dict(zip(ASSETS_COLUMNS, row))
-                    
-                    # Use the helper method to convert numeric fields
-                    data = ValidationHelpers.convert_numeric_fields(data, ASSETS_NUMERIC_FIELDS)
-                    
-                    return data
-                return None
+                return data
+            return None
         except Exception as e:
             print(f"❌ Error getting latest snapshot: {e}")
             return None
     
     def parse_amount(self, input_str: str) -> Optional[float]:
-        """Parse various amount formats using the centralized validation helper"""
-        return ValidationHelpers.parse_amount(input_str)
+        """Parse various amount formats: '$1,234.56', '1234.56', 'about 1200', etc."""
+        if not input_str or input_str.lower().strip() in ['', 'skip', 'same', 'unchanged']:
+            return None
+        
+        # Clean the input
+        cleaned = input_str.lower().strip()
+        cleaned = re.sub(r'[,$]', '', cleaned)  # Remove $ and commas
+        cleaned = re.sub(r'about|around|roughly|approximately', '', cleaned).strip()
+        
+        # Extract number
+        match = re.search(r'(\d+(?:\.\d{2})?)', cleaned)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+        return None
     
     def start_assets_checkin(self):
         """Main assets check-in conversation"""
@@ -423,12 +169,12 @@ class AssetsManager:
         print("   ⚡ Quick (5 min) - Just the basics")
         print("   🔍 Full (15 min) - Complete review")
         
-        # Use the centralized validation helper for user choice
-        choice = ValidationHelpers.get_user_choice(
-            "\n✨ Choice (quick/full): ",
-            ['quick', 'q', 'full', 'f']
-        )
-        update_type = 'quick' if choice in ['quick', 'q'] else 'full'
+        while True:
+            choice = input("\n✨ Choice (quick/full): ").lower().strip()
+            if choice in ['quick', 'q', 'full', 'f']:
+                update_type = 'quick' if choice in ['quick', 'q'] else 'full'
+                break
+            print("🤔 Please choose 'quick' or 'full'")
         
         # Run the appropriate check-in
         if update_type == 'quick':
@@ -651,22 +397,23 @@ class AssetsManager:
             clean_data = {k: v for k, v in data.items() 
                          if k not in ['id', 'created_at']}
             
-            # Save to database using the context manager
-            with get_db_connection(self.assets_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # Build dynamic insert query with clean data
-                columns = list(clean_data.keys())
-                placeholders = ', '.join(['?' for _ in columns])
-                values = list(clean_data.values())
-                
-                query = f'''
-                INSERT INTO asset_snapshots ({', '.join(columns)})
-                VALUES ({placeholders})
-                '''
-                
-                cursor.execute(query, values)
-                conn.commit()
+            # Save to database
+            conn = sqlite3.connect(self.assets_db_path)
+            cursor = conn.cursor()
+            
+            # Build dynamic insert query with clean data
+            columns = list(clean_data.keys())
+            placeholders = ', '.join(['?' for _ in columns])
+            values = list(clean_data.values())
+            
+            query = f'''
+            INSERT INTO asset_snapshots ({', '.join(columns)})
+            VALUES ({placeholders})
+            '''
+            
+            cursor.execute(query, values)
+            conn.commit()
+            conn.close()
             
             # Show beautiful results
             self.show_results(data)
@@ -735,57 +482,200 @@ class AssetsManager:
 
 
 class TreeTillProcessor:
-    """
-    Main processor for Tree Till transactions.
-    Now uses the new helper classes for cleaner, more maintainable code.
-    """
-    
-    def __init__(self, model_name=DEFAULT_MODEL_NAME, base_url=DEFAULT_OLLAMA_BASE_URL):
+    def __init__(self, model_name="gemma3n:latest", base_url="http://localhost:11434"):
         self.model_name = model_name
         self.base_url = base_url
-        
-        # Initialize the API client for Mycelium communication
-        mycelium_api_url = os.getenv('MYCELIUM_API_URL')  # Railway URL
-        self.api_client = MyceliumAPIClient(mycelium_api_url)
-        
+        self.mycelium_api_url = os.getenv('MYCELIUM_API_URL')  # Railway URL
         # Use script directory for tree database
         self.tree_db_path = SCRIPT_DIR / 'tree_till.db'
-        
-        # Categories are now imported from config
-        self.categories = TRANSACTION_CATEGORIES
+        self.categories = [
+            "Food & Dining",
+            "Transportation", 
+            "Personal Care",
+            "Health & Fitness",
+            "Shopping & Retail",
+            "Entertainment",
+            "Bills & Utilities",
+            "Professional & Work",
+            "Education & Learning",
+            "Travel",
+            "Home & Garden",
+            "Income - Freelance",
+            "Income - Salary", 
+            "Income - Other",
+            "Other"
+        ]
     
     def init_tree_database(self):
         """Initialize the Tree Till database for processed transactions"""
-        with get_db_connection(self.tree_db_path) as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                mycelium_id INTEGER,
-                timestamp DATETIME,
-                amount REAL NOT NULL,
-                description TEXT,
-                category TEXT,
-                currency TEXT DEFAULT 'USD',
-                is_income BOOLEAN DEFAULT FALSE,
-                raw_message TEXT,
-                user_id INTEGER,
-                username TEXT,
-                processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            ''')
-            
-            conn.commit()
+        conn = sqlite3.connect(self.tree_db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mycelium_id INTEGER,
+            timestamp DATETIME,
+            amount REAL NOT NULL,
+            description TEXT,
+            category TEXT,
+            currency TEXT DEFAULT 'USD',
+            is_income BOOLEAN DEFAULT FALSE,
+            raw_message TEXT,
+            user_id INTEGER,
+            username TEXT,
+            processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        conn.commit()
+        conn.close()
         print("🌳 Tree Till database initialized!")
     
     def get_pending_mycelium_messages(self) -> List[Tuple]:
-        """Get all unprocessed messages using the unified API client"""
-        return self.api_client.get_pending_messages()
+        """Get all unprocessed messages - Railway API first, local SQLite fallback"""
+        
+        # Try Railway API first
+        if self.mycelium_api_url:
+            try:
+                print(f"🚀 Fetching from Railway API: {self.mycelium_api_url}")
+                response = requests.get(
+                    f"{self.mycelium_api_url}/api/pending-messages",
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    print(f"☁️  Got {len(data)} messages from Railway")
+                    
+                    # Convert JSON back to tuple format expected by the processor
+                    results = []
+                    for msg in data:
+                        results.append((
+                            msg['id'],
+                            msg['user_id'], 
+                            msg['username'],
+                            msg['raw_message'],
+                            msg['message_type'],
+                            msg['amount'],
+                            msg['currency'],
+                            msg['description'],
+                            msg['is_income'],
+                            msg['timestamp']
+                        ))
+                    return results
+                else:
+                    print(f"⚠️  Railway API error {response.status_code}, falling back to local")
+                    
+            except Exception as e:
+                print(f"⚠️  Railway API connection failed: {e}, falling back to local")
+        
+        # Fallback to local SQLite (development mode)
+        print("💻 Using local mycelium database")
+        try:
+            # Try multiple possible paths for the mycelium database
+            possible_paths = [
+                './bots/mycelium_bot/mycelium_messages.db',
+                '../mycelium_bot/mycelium_messages.db',
+                '../../bots/mycelium_bot/mycelium_messages.db'
+            ]
+            
+            mycelium_db_path = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    mycelium_db_path = path
+                    break
+            
+            if not mycelium_db_path:
+                print("❌ Could not find mycelium database file")
+                return []
+            
+            print(f"🗄️  Database path: {mycelium_db_path}")
+            conn = sqlite3.connect(mycelium_db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+            SELECT id, user_id, username, raw_message, message_type, 
+                   amount, currency, description, is_income, timestamp
+            FROM pending_messages 
+            WHERE processed = FALSE AND amount IS NOT NULL
+            ORDER BY timestamp ASC
+            ''')
+            
+            results = cursor.fetchall()
+            conn.close()
+            print(f"📥 Got {len(results)} messages from local database")
+            return results
+            
+        except Exception as e:
+            print(f"❌ Error reading local mycelium messages: {e}")
+            return []
     
     def mark_mycelium_processed(self, message_ids: List[int]) -> bool:
-        """Mark messages as processed using the unified API client"""
-        return self.api_client.mark_messages_processed(message_ids)
+        """Mark messages as processed - Railway API first, local SQLite fallback"""
+        
+        if not message_ids:
+            return True
+        
+        # Try Railway API first
+        if self.mycelium_api_url:
+            try:
+                response = requests.post(
+                    f"{self.mycelium_api_url}/api/mark-processed",
+                    json={'message_ids': message_ids},
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    updated_count = result.get('updated_count', 0)
+                    print(f"☁️  Railway: Marked {updated_count} messages as processed")
+                    return updated_count > 0
+                else:
+                    print(f"⚠️  Railway mark-processed error {response.status_code}, falling back to local")
+                    
+            except Exception as e:
+                print(f"⚠️  Railway mark-processed failed: {e}, falling back to local")
+        
+        # Fallback to local SQLite
+        try:
+            # Try multiple possible paths for the mycelium database
+            possible_paths = [
+                './bots/mycelium_bot/mycelium_messages.db',
+                '../mycelium_bot/mycelium_messages.db',
+                '../../bots/mycelium_bot/mycelium_messages.db'
+            ]
+            
+            mycelium_db_path = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    mycelium_db_path = path
+                    break
+            
+            if not mycelium_db_path:
+                print("❌ Could not find mycelium database file")
+                return False
+            
+            conn = sqlite3.connect(mycelium_db_path)
+            cursor = conn.cursor()
+            
+            # Mark multiple messages as processed
+            placeholders = ','.join(['?' for _ in message_ids])
+            cursor.execute(
+                f'UPDATE pending_messages SET processed = TRUE WHERE id IN ({placeholders})',
+                message_ids
+            )
+            
+            updated = cursor.rowcount
+            conn.commit()
+            conn.close()
+            
+            print(f"💻 Local: Marked {updated} messages as processed")
+            return updated > 0
+            
+        except Exception as e:
+            print(f"❌ Error marking local messages as processed: {e}")
+            return False
     
     def categorize_transaction(self, description: str, amount: float, is_income: bool) -> Optional[str]:
         """Use Gemma to categorize a transaction (expense or income)"""
@@ -835,7 +725,7 @@ Category:"""
                         "num_predict": 30    # Allow for longer category names
                     }
                 },
-                timeout=OLLAMA_TIMEOUT  # Use the centralized timeout constant
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -873,18 +763,19 @@ Category:"""
                                  raw_message: str) -> bool:
         """Save processed transaction to tree_till.db"""
         try:
-            with get_db_connection(self.tree_db_path) as conn:
-                cursor = conn.cursor()
-                
-                cursor.execute('''
-                INSERT INTO transactions (mycelium_id, user_id, username, timestamp, 
-                                        amount, description, category, currency, 
-                                        is_income, raw_message)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (mycelium_id, user_id, username, timestamp, amount, description,
-                      category, currency, is_income, raw_message))
-                
-                conn.commit()
+            conn = sqlite3.connect(self.tree_db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+            INSERT INTO transactions (mycelium_id, user_id, username, timestamp, 
+                                    amount, description, category, currency, 
+                                    is_income, raw_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (mycelium_id, user_id, username, timestamp, amount, description,
+                  category, currency, is_income, raw_message))
+            
+            conn.commit()
+            conn.close()
             return True
         except Exception as e:
             print(f"❌ Error saving transaction: {e}")
@@ -893,41 +784,43 @@ Category:"""
     def handle_correction(self, user_id: int, new_amount: float, currency: str) -> bool:
         """Update the most recent transaction for this user"""
         try:
-            with get_db_connection(self.tree_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # Find the most recent transaction for this user
-                cursor.execute('''
-                SELECT id, amount, description, category, is_income
-                FROM transactions 
-                WHERE user_id = ?
-                ORDER BY processed_at DESC, id DESC
-                LIMIT 1
-                ''', (user_id,))
-                
-                last_transaction = cursor.fetchone()
-                
-                if not last_transaction:
-                    print("   ❌ No previous transaction found to correct")
-                    return False
-                
-                transaction_id, old_amount, description, old_category, is_income = last_transaction
-                
-                print(f"   🔍 Found transaction: ${old_amount:.2f} for {description}")
-                print(f"   ✏️ Updating to: ${new_amount:.2f}")
-                
-                # Update the transaction
-                cursor.execute('''
-                UPDATE transactions 
-                SET amount = ?, currency = ?, processed_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                ''', (new_amount, currency, transaction_id))
-                
-                conn.commit()
-                
-                print(f"   ✅ Correction applied!")
-                return True
-                
+            conn = sqlite3.connect(self.tree_db_path)
+            cursor = conn.cursor()
+            
+            # Find the most recent transaction for this user
+            cursor.execute('''
+            SELECT id, amount, description, category, is_income
+            FROM transactions 
+            WHERE user_id = ?
+            ORDER BY processed_at DESC, id DESC
+            LIMIT 1
+            ''', (user_id,))
+            
+            last_transaction = cursor.fetchone()
+            
+            if not last_transaction:
+                print("   ❌ No previous transaction found to correct")
+                conn.close()
+                return False
+            
+            transaction_id, old_amount, description, old_category, is_income = last_transaction
+            
+            print(f"   🔍 Found transaction: ${old_amount:.2f} for {description}")
+            print(f"   ✏️ Updating to: ${new_amount:.2f}")
+            
+            # Update the transaction
+            cursor.execute('''
+            UPDATE transactions 
+            SET amount = ?, currency = ?, processed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ''', (new_amount, currency, transaction_id))
+            
+            conn.commit()
+            conn.close()
+            
+            print(f"   ✅ Correction applied!")
+            return True
+            
         except Exception as e:
             print(f"   ❌ Error handling correction: {e}")
             return False
@@ -935,37 +828,39 @@ Category:"""
     def handle_undo(self, user_id: int) -> bool:
         """Delete the most recent transaction for this user"""
         try:
-            with get_db_connection(self.tree_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # Find the most recent transaction for this user
-                cursor.execute('''
-                SELECT id, amount, description, category
-                FROM transactions 
-                WHERE user_id = ?
-                ORDER BY processed_at DESC, id DESC
-                LIMIT 1
-                ''', (user_id,))
-                
-                last_transaction = cursor.fetchone()
-                
-                if not last_transaction:
-                    print("   ❌ No transaction found to undo")
-                    return False
-                
-                transaction_id, amount, description, category = last_transaction
-                
-                print(f"   🔍 Found transaction: ${amount:.2f} for {description} ({category})")
-                print(f"   🗑️ Removing transaction...")
-                
-                # Delete the transaction
-                cursor.execute('DELETE FROM transactions WHERE id = ?', (transaction_id,))
-                
-                conn.commit()
-                
-                print(f"   ✅ Transaction undone!")
-                return True
-                
+            conn = sqlite3.connect(self.tree_db_path)
+            cursor = conn.cursor()
+            
+            # Find the most recent transaction for this user
+            cursor.execute('''
+            SELECT id, amount, description, category
+            FROM transactions 
+            WHERE user_id = ?
+            ORDER BY processed_at DESC, id DESC
+            LIMIT 1
+            ''', (user_id,))
+            
+            last_transaction = cursor.fetchone()
+            
+            if not last_transaction:
+                print("   ❌ No transaction found to undo")
+                conn.close()
+                return False
+            
+            transaction_id, amount, description, category = last_transaction
+            
+            print(f"   🔍 Found transaction: ${amount:.2f} for {description} ({category})")
+            print(f"   🗑️ Removing transaction...")
+            
+            # Delete the transaction
+            cursor.execute('DELETE FROM transactions WHERE id = ?', (transaction_id,))
+            
+            conn.commit()
+            conn.close()
+            
+            print(f"   ✅ Transaction undone!")
+            return True
+            
         except Exception as e:
             print(f"   ❌ Error handling undo: {e}")
             return False
@@ -975,8 +870,8 @@ Category:"""
         print("🌳 TREE TILL AWAKENING! 🌳")
         print("🍄 Syncing with mycelium network...")
         
-        # Detect mode based on API client configuration
-        mode = "☁️ Railway Cloud" if self.api_client.base_url else "💻 Local Development"
+        # Detect mode
+        mode = "☁️ Railway Cloud" if self.mycelium_api_url else "💻 Local Development"
         print(f"🔧 Mode: {mode}")
         
         # Get pending messages
@@ -1052,133 +947,24 @@ Category:"""
         print("🌲 The forest grows wiser with each transaction!")
         
         return success_count > 0
-    
-    def show_tree_stats_by_currency(self):
-        """Show statistics from the tree database properly grouped by currency"""
-        try:
-            with get_db_connection(self.tree_db_path) as conn:
-                cursor = conn.cursor()
-                
-                print(f"\n🧠 TREE TILL WISDOM (MULTI-CURRENCY)")
-                print("=" * 55)
-                
-                # Get currency-grouped totals for expenses
-                cursor.execute('''
-                SELECT currency, COUNT(*), SUM(amount)
-                FROM transactions 
-                WHERE is_income = FALSE
-                GROUP BY currency
-                ORDER BY currency
-                ''')
-                expense_by_currency = cursor.fetchall()
-                
-                # Get currency-grouped totals for income
-                cursor.execute('''
-                SELECT currency, COUNT(*), SUM(amount)
-                FROM transactions 
-                WHERE is_income = TRUE
-                GROUP BY currency
-                ORDER BY currency
-                ''')
-                income_by_currency = cursor.fetchall()
-                
-                # Display expenses by currency
-                if expense_by_currency:
-                    print(f"💸 EXPENSES BY CURRENCY:")
-                    total_expense_transactions = 0
-                    for currency, count, total in expense_by_currency:
-                        total_expense_transactions += count
-                        print(f"   💵 {currency}: {total:.2f} ({count} transactions)")
-                    print(f"   📈 Total expense transactions: {total_expense_transactions}")
-                else:
-                    print(f"💸 EXPENSES: No expense transactions yet")
-                
-                print()
-                
-                # Display income by currency
-                if income_by_currency:
-                    print(f"💰 INCOME BY CURRENCY:")
-                    total_income_transactions = 0
-                    for currency, count, total in income_by_currency:
-                        total_income_transactions += count
-                        print(f"   💵 {currency}: {total:.2f} ({count} transactions)")
-                    print(f"   📈 Total income transactions: {total_income_transactions}")
-                else:
-                    print(f"💰 INCOME: No income transactions yet")
-                
-                print()
-                
-                # Net position by currency (only meaningful for same currency)
-                print(f"🎯 NET POSITION BY CURRENCY:")
-                all_currencies = set()
-                if expense_by_currency:
-                    all_currencies.update([curr for curr, _, _ in expense_by_currency])
-                if income_by_currency:
-                    all_currencies.update([curr for curr, _, _ in income_by_currency])
-                
-                expense_dict = {curr: total for curr, _, total in expense_by_currency}
-                income_dict = {curr: total for curr, _, total in income_by_currency}
-                
-                for currency in sorted(all_currencies):
-                    income_total = income_dict.get(currency, 0)
-                    expense_total = expense_dict.get(currency, 0)
-                    net_position = income_total - expense_total
-                    net_emoji = "🔴" if net_position >= 0 else "🔴"
-                    print(f"   {net_emoji} {currency}: {net_position:+.2f}")
-                
-                # Category breakdown by currency
-                cursor.execute('''
-                SELECT currency, category, COUNT(*), SUM(amount), is_income
-                FROM transactions 
-                GROUP BY currency, category, is_income
-                ORDER BY currency, is_income DESC, SUM(amount) DESC
-                ''')
-                
-                categories = cursor.fetchall()
-                
-                if categories:
-                    print(f"\n📊 CATEGORY BREAKDOWN BY CURRENCY:")
-                    print("-" * 55)
-                    current_currency = None
-                    current_type = None
-                    
-                    for currency, category, count, total, is_income in categories:
-                        # Print currency header when we encounter a new currency
-                        if currency != current_currency:
-                            current_currency = currency
-                            current_type = None
-                            print(f"\n💵 {currency}:")
-                        
-                        # Print income/expense section header when type changes
-                        if is_income != current_type:
-                            current_type = is_income
-                            section_title = "INCOME" if is_income else "EXPENSES"
-                            section_emoji = "💰" if is_income else "💸"
-                            print(f"  {section_emoji} {section_title}:")
-                        
-                        # Print individual category
-                        emoji = "💰" if is_income else "💸"
-                        print(f"    {emoji} {category}: {total:.2f} ({count} transactions)")
-            
-        except Exception as e:
-            print(f"❌ Error showing currency stats: {e}")
 
+    
     def show_tree_stats(self):
         """Show statistics from the tree database"""
         try:
-            with get_db_connection(self.tree_db_path) as conn:
-                cursor = conn.cursor()
-                
-                # Total counts
-                cursor.execute('SELECT COUNT(*), SUM(amount) FROM transactions WHERE is_income = FALSE')
-                expense_count, expense_total = cursor.fetchone()
-                expense_total = expense_total or 0
-                
-                cursor.execute('SELECT COUNT(*), SUM(amount) FROM transactions WHERE is_income = TRUE')
-                income_count, income_total = cursor.fetchone()
-                income_total = income_total or 0
-                
-                print(f"\n🧠 TREE TILL WISDOM")
+            conn = sqlite3.connect(self.tree_db_path)
+            cursor = conn.cursor()
+            
+            # Total counts
+            cursor.execute('SELECT COUNT(*), SUM(amount) FROM transactions WHERE is_income = FALSE')
+            expense_count, expense_total = cursor.fetchone()
+            expense_total = expense_total or 0
+            
+            cursor.execute('SELECT COUNT(*), SUM(amount) FROM transactions WHERE is_income = TRUE')
+            income_count, income_total = cursor.fetchone()
+            income_total = income_total or 0
+            
+            print(f"\n🧠 TREE TILL WISDOM")
             print("=" * 40)
             print(f"💸 Total Expenses: {expense_count} transactions, ${expense_total:.2f}")
             print(f"💰 Total Income: {income_count} transactions, ${income_total:.2f}")
@@ -1202,6 +988,8 @@ Category:"""
                 for category, count, total, is_income in categories:
                     emoji = "💰" if is_income else "💸"
                     print(f"{emoji} {category}: ${total:.2f} ({count} transactions)")
+            
+            conn.close()
             
         except Exception as e:
             print(f"❌ Error showing stats: {e}")
@@ -1246,8 +1034,8 @@ def main():
     # STEP 1: Process pending messages
     processed_new_transactions = processor.process_pending_messages()
     
-    # STEP 2: Show current stats (currency-aware)
-    processor.show_tree_stats_by_currency()
+    # STEP 2: Show current stats
+    processor.show_tree_stats()
     
     # STEP 3: Optional assets check-in
     print("\n" + "=" * 55)
