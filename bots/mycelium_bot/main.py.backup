@@ -1,7 +1,7 @@
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import requests
@@ -54,7 +54,7 @@ def detect_currency(text):
         return 'USD', text.replace('$', '').strip()
     return 'USD', text
 
-# FIXED: Better income vs expense detection
+# Income vs expense detection
 def detect_income_vs_expense(text):
     text_lower = text.lower()
     
@@ -111,6 +111,27 @@ def detect_income_vs_expense(text):
 def parse_financial_text(message_text):
     original_text = message_text.strip()
     currency, text_without_currency = detect_currency(original_text)
+    
+    # Check for correction patterns FIRST (before income/expense detection)
+    correction_patterns = [
+        r'(?:actually|wait|i meant|should be|correction|make that|change to|fix that|sorry|oops)[,\s]*(\d+(?:\.\d{2})?)',
+        r'^(\d+(?:\.\d{2})?)\s*(?:correction|fix|change)',
+        r'correction[:\s]*(\d+(?:\.\d{2})?)'
+    ]
+    
+    text_lower = text_without_currency.lower()
+    
+    # Check if this is a correction
+    for pattern in correction_patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            try:
+                amount = float(match.group(1))
+                return amount, "CORRECTION", currency, None, 'correction'  # None for is_income = Tree Till decides
+            except ValueError:
+                continue
+    
+    # If not a correction, proceed with normal parsing
     is_income, confidence = detect_income_vs_expense(original_text)
     text = text_without_currency.lower()
 
@@ -126,10 +147,7 @@ def parse_financial_text(message_text):
         (r'^(\d+(?:\.\d{2})?)\s+(?:dollars?|euros?|pounds?|yen|yuan)?\s*(.*)', 'amount_first'),
         
         # Description first patterns
-        (r'^(.*?)\s+(\d+(?:\.\d{2})?)$', 'desc_first'),
-        
-        # Correction patterns
-        (r'(?:actually|wait|i meant|should be|correction|make that|change to|fix that|sorry|oops)[,\s]*(\d+(?:\.\d{2})?)', 'correction')
+        (r'^(.*?)\s+(\d+(?:\.\d{2})?)$', 'desc_first')
     ]
 
     for pattern, order_type in patterns:
@@ -142,10 +160,6 @@ def parse_financial_text(message_text):
                 elif order_type == 'desc_first':
                     description = match.group(1).strip()
                     amount = float(match.group(2))
-                elif order_type == 'correction':
-                    amount = float(match.group(1))
-                    remaining = re.sub(pattern, '', text).strip()
-                    description = remaining if remaining else None
                 else:
                     continue
 
@@ -166,6 +180,8 @@ def parse_financial_text(message_text):
 def init_cloud_database():
     conn = sqlite3.connect('mycelium_messages.db')
     cursor = conn.cursor()
+    
+    # Main messages table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS pending_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,9 +197,163 @@ def init_cloud_database():
             processed BOOLEAN DEFAULT FALSE
         )
     ''')
+    
+    # NEW: Running stats table for quick queries
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS running_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            date DATE,
+            total_spent REAL DEFAULT 0,
+            total_earned REAL DEFAULT 0,
+            transaction_count INTEGER DEFAULT 0,
+            last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, date)
+        )
+    ''')
+    
     conn.commit()
     conn.close()
     print("🍄 Mycelium database initialized!")
+
+def update_running_stats(user_id, amount, is_income):
+    """Update daily running stats when a transaction is recorded"""
+    try:
+        conn = sqlite3.connect('mycelium_messages.db')
+        cursor = conn.cursor()
+        
+        today = date.today().isoformat()
+        
+        # Get existing stats for today
+        cursor.execute('''
+            SELECT total_spent, total_earned, transaction_count 
+            FROM running_stats WHERE user_id = ? AND date = ?
+        ''', (user_id, today))
+        
+        existing = cursor.fetchone()
+        
+        if existing:
+            spent, earned, count = existing
+            if is_income:
+                earned += amount
+            else:
+                spent += amount
+            count += 1
+            
+            cursor.execute('''
+                UPDATE running_stats 
+                SET total_spent = ?, total_earned = ?, transaction_count = ?, last_updated = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND date = ?
+            ''', (spent, earned, count, user_id, today))
+        else:
+            spent = 0 if is_income else amount
+            earned = amount if is_income else 0
+            
+            cursor.execute('''
+                INSERT INTO running_stats (user_id, date, total_spent, total_earned, transaction_count)
+                VALUES (?, ?, ?, ?, 1)
+            ''', (user_id, today, spent, earned))
+        
+        conn.commit()
+        conn.close()
+        
+    except Exception as e:
+        print(f"❌ Error updating stats: {e}")
+
+def get_stats(user_id, days=1):
+    """Get running stats for the last N days"""
+    try:
+        conn = sqlite3.connect('mycelium_messages.db')
+        cursor = conn.cursor()
+        
+        # Calculate date range
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days-1)
+        
+        cursor.execute('''
+            SELECT date, total_spent, total_earned, transaction_count
+            FROM running_stats 
+            WHERE user_id = ? AND date BETWEEN ? AND ?
+            ORDER BY date DESC
+        ''', (user_id, start_date.isoformat(), end_date.isoformat()))
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        if not results:
+            return None
+        
+        # Sum up the period
+        total_spent = sum(row[1] for row in results)
+        total_earned = sum(row[2] for row in results)
+        total_transactions = sum(row[3] for row in results)
+        
+        return {
+            'days': days,
+            'spent': total_spent,
+            'earned': total_earned,
+            'net': total_earned - total_spent,
+            'transactions': total_transactions,
+            'daily_breakdown': results
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting stats: {e}")
+        return None
+
+def get_category_stats(user_id, days=7):
+    """Get category breakdown from recent messages"""
+    try:
+        conn = sqlite3.connect('mycelium_messages.db')
+        cursor = conn.cursor()
+        
+        # Get messages from last N days
+        cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+        
+        cursor.execute('''
+            SELECT description, amount, is_income, message_type
+            FROM pending_messages 
+            WHERE user_id = ? AND timestamp >= ? AND amount IS NOT NULL
+            ORDER BY timestamp DESC
+        ''', (user_id, cutoff_date))
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        # Group by rough categories (simplified for quick stats)
+        categories = {}
+        for desc, amount, is_income, msg_type in results:
+            if msg_type == "correction":
+                continue  # Skip corrections for category stats
+                
+            # Simple category detection
+            desc_lower = (desc or "other").lower()
+            category = "Other"
+            
+            if any(word in desc_lower for word in ['coffee', 'tea', 'food', 'lunch', 'dinner', 'restaurant']):
+                category = "🍕 Food"
+            elif any(word in desc_lower for word in ['uber', 'taxi', 'gas', 'transport', 'metro']):
+                category = "🚗 Transport"  
+            elif any(word in desc_lower for word in ['book', 'course', 'lesson', 'education']):
+                category = "📚 Learning"
+            elif any(word in desc_lower for word in ['subscription', 'netflix', 'spotify']):
+                category = "📱 Subscriptions"
+            elif is_income:
+                category = "💰 Income"
+            else:
+                category = "💸 Other"
+            
+            if category not in categories:
+                categories[category] = {'total': 0, 'count': 0}
+            
+            categories[category]['total'] += amount
+            categories[category]['count'] += 1
+        
+        return categories
+        
+    except Exception as e:
+        print(f"❌ Error getting category stats: {e}")
+        return {}
 
 def store_message(user_id, username, raw_message, message_type, amount=None, currency='USD', description=None, is_income=False):
     conn = sqlite3.connect('mycelium_messages.db')
@@ -194,6 +364,10 @@ def store_message(user_id, username, raw_message, message_type, amount=None, cur
     ''', (user_id, username, raw_message, message_type, amount, currency, description, is_income))
     conn.commit()
     conn.close()
+    
+    # Update running stats if it's a financial transaction
+    if amount is not None and message_type not in ["correction", "undo_request", "command"]:
+        update_running_stats(user_id, amount, is_income)
 
 def send_telegram_message(chat_id, text):
     token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -237,26 +411,39 @@ def webhook():
         if text.startswith('/start'):
             store_message(user_id, username, text, "command")
             send_telegram_message(chat_id,
-                "🍄 Mycelium Till here!\n\n"
+                "🍄 *Mycelium Till here!*\n\n"
                 "Send expenses or income like:\n"
-                "• 'Coffee 5 dollars' or 'Spent 8.60 on book'\n"
-                "• 'Earned 200 from client'\n\n"
+                "• `Coffee 5 dollars` or `Spent 8.60 on book`\n"
+                "• `Earned 200 from client`\n"
+                "• `Actually 12.50` (to correct last amount)\n\n"
+                "*Commands:*\n"
+                "• `/undo` - Mark last transaction for removal\n\n"
                 "🌳 Tree Till will process everything when your laptop is online!"
             )
             return "OK"
+            
         elif text.startswith('/undo'):
             store_message(user_id, username, text, "undo_request")
-            send_telegram_message(chat_id, "📝 Undo noted! Tree Till will handle it when processing.")
+            send_telegram_message(chat_id, "🔄 Undo noted! Tree Till will handle it when processing.")
             return "OK"
+            
         elif text.startswith('/whoami'):
             send_telegram_message(chat_id, f"🆔 User ID: `{user_id}`\nUsername: @{username}")
             return "OK"
+            
 
-        # Handle regular messages (FIXED INDENTATION)
+        # Handle regular messages
         if not text.startswith('/'):
-            amount, description, currency, is_income, confidence = parse_financial_text(text)
+            amount, description, currency, is_income, parse_type = parse_financial_text(text)
 
-            if amount and description:
+            # Handle corrections specially
+            if parse_type == 'correction':
+                store_message(user_id, username, text, "correction", amount, currency, description, None)
+                send_telegram_message(chat_id,
+                    f"✏️ Correction noted! ${amount:.2f}\n"
+                    "🌳 Tree Till will update your last transaction!"
+                )
+            elif amount and description:
                 msg_type = "income" if is_income else "expense"
                 store_message(user_id, username, text, msg_type, amount, currency, description, is_income)
 
@@ -265,27 +452,27 @@ def webhook():
 
                 # Show confidence level for debugging
                 confidence_note = ""
-                if confidence == 0:
+                if parse_type == 0:
                     confidence_note = " (guessing expense)"
-                elif confidence == 1:
+                elif parse_type == 1:
                     confidence_note = " (low confidence)"
 
                 send_telegram_message(chat_id,
-                    f"📝 {emoji} {currency} {amount:.2f} {action} on {description}{confidence_note}\n"
+                    f"✅ {emoji} {currency} {amount:.2f} {action} on {description}{confidence_note}\n"
                     "🍄 Stored for Tree Till! 🌳"
                 )
             elif amount and not description:
-                store_message(user_id, username, text, "correction", amount, currency, None, is_income)
-                action = "earned" if is_income else "spent"
+                # This might be a poorly formatted correction
+                store_message(user_id, username, text, "unclear_amount", amount, currency, "NEEDS_CONTEXT", is_income)
                 send_telegram_message(chat_id,
-                    f"✏️ Correction noted! {currency} {amount:.2f} {action}\n"
-                    "🌳 Tree Till will fix your last transaction!"
+                    f"🤔 Got ${amount:.2f} but unclear what for...\n"
+                    "💡 Try: `Actually 8.50 on coffee` or `Correction: 15.75`"
                 )
             else:
                 store_message(user_id, username, text, "unclear")
                 send_telegram_message(chat_id,
-                    f"📝 Noted: '{text}'\n"
-                    "🤔 Not sure if that's a transaction, but Tree Till will figure it out!"
+                    f"🍄 Noted: '{text}'\n"
+                    "🤖 Not sure if that's a transaction, but Tree Till will figure it out!"
                 )
 
         return "OK"
@@ -358,7 +545,7 @@ def main():
     
     # Show allowed users for debugging
     if ALLOWED_USERS:
-        print(f"🔐 Authorized users: {ALLOWED_USERS}")
+        print(f"✅ Authorized users: {ALLOWED_USERS}")
     else:
         print("⚠️ No authorized users configured!")
     
